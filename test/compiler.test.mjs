@@ -11,18 +11,10 @@ const replExpected = JSON.parse(
   await readFile(new URL("./fixtures/repl.expected.json", import.meta.url), "utf8"),
 );
 
+const decoder = new TextDecoder("utf-8", { fatal: true });
+
 function decodeError(bytes) {
-  assert.equal(bytes.length, 28);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), "WFCE");
-  return {
-    version: view.getUint32(4, true),
-    code: view.getUint32(8, true),
-    offset: view.getUint32(12, true),
-    span: view.getUint32(16, true),
-    expected: view.getUint32(20, true),
-    actual: view.getUint32(24, true),
-  };
+  return decoder.decode(bytes);
 }
 
 function replChunks(text) {
@@ -44,6 +36,8 @@ async function compileIncrement(text) {
     payload: result.response[1],
     length: result.response[2],
     bytes: result.payloadBytes,
+    spanOffset: result.spanOffset,
+    spanLength: result.spanLength,
     instances: result.installations.map(({ instance }) => instance),
     modules: result.installations.map(({ bytes }) => bytes),
     execution: result.execution,
@@ -134,8 +128,8 @@ async function compileIncrement(text) {
         : [result.execution.value];
       assert.deepEqual(values, expected.values, source);
     } else {
-      assert.ok(result.status >= 256, source);
-      assert.equal(decodeError(result.bytes).code, expected.code, source);
+      assert.equal(result.status, 3, source);
+      assert.equal(decodeError(result.bytes), expected.message, source);
     }
   }
 }
@@ -147,28 +141,39 @@ async function compileIncrement(text) {
 }
 
 const failures = [
-  [": bad ( -- i32 ) 1 i32.add ;", 5],
-  [": bad ( -- i32 i32 ) 1 ;", 13],
-  [": bad ( -- i32 ) ;", 6],
-  [": bad ( -- i32 ) 2147483648 ;", 8],
-  [": outer ( -- i32 ) : inner ( -- i32 ) 1 ; ;", 3],
-  [": bad ( -- i32 ) missing ;", 4],
-  ["export missing", 7],
-  [": unfinished ( -- i32 ) 1", 2],
-  [": bad ( f32 -- i32 ) 1 ;", 12],
-  [": bad ( -- i32 ) local x i32 !x @x ;", 5],
-  [": bad ( i32 -- i32 ) local x i32 local x i32 @x ;", 14],
-  [": bad ( i32 -- i32 ) !missing ;", 15],
-  [": bad ( i32 -- i32 ) @missing ;", 15],
-  [": bad ( i32 -- i32 ) local x i32 x ;", 16],
-  [": add ( i32 i32 -- i32 ) i32.add ;", 9],
-  [": first ( i32 -- i32 ) local x i32 !x @x ; : second ( -- i32 ) @x ;", 15],
+  [": bad ( -- i32 ) 1 i32.add ;", "type stack underflow: `i32.add`", "i32.add"],
+  [": bad ( -- i32 i32 ) 1 ;", "definition result does not match signature: `;`", ";"],
+  [": bad ( -- i32 ) ;", "empty definition: `;`", ";"],
+  [": bad ( -- i32 ) 2147483648 ;", "integer literal out of i32 range: `2147483648`", "2147483648"],
+  [": outer ( -- i32 ) : inner ( -- i32 ) 1 ; ;", "nested definition: `:`", ":"],
+  [": bad ( -- i32 ) missing ;", "unknown name: `missing`", "missing"],
+  [": bad ( -- i32 ) míssing ;", "unknown name: `míssing`", "míssing"],
+  ["export missing", "unknown export: `missing`", "missing"],
+  [": unfinished ( -- i32 ) 1", "unexpected token or end of input", ""],
+  [": bad ( f32 -- i32 ) 1 ;", "unsupported signature type: `f32`", "f32"],
+  [": bad ( -- i32 ) local x f32 ;", "unsupported signature type: `f32`", "f32"],
+  [": bad ( -- i32 ) local x i32 !x @x ;", "type stack underflow: `!x`", "!x"],
+  [": bad ( i32 -- i32 ) local x i32 local x i32 @x ;", "duplicate or reserved local name: `x`", "x"],
+  [": bad ( i32 -- i32 ) !missing ;", "unknown local name: `!missing`", "!missing"],
+  [": bad ( i32 -- i32 ) @missing ;", "unknown local name: `@missing`", "@missing"],
+  [": bad ( i32 -- i32 ) local x i32 x ;", "local name requires @, !, or !@: `x`", "x"],
+  [": add ( i32 i32 -- i32 ) i32.add ;", "duplicate definition: `add`", "add"],
+  [": first ( i32 -- i32 ) local x i32 !x @x ; : second ( -- i32 ) @x ;", "unknown local name: `@x`", "@x"],
 ];
 
-for (const [source, code] of failures) {
+const encoder = new TextEncoder();
+
+for (const [source, message, expectedToken] of failures) {
   const result = await compileSource(source);
-  assert.equal(result.status, 256 + code, source);
-  assert.equal(decodeError(result.bytes).code, code, source);
+  assert.equal(result.status, 3, source);
+  assert.equal(decodeError(result.bytes), message, source);
+  if (expectedToken) {
+    const sourceBytes = encoder.encode(source);
+    const token = decoder.decode(
+      sourceBytes.slice(result.spanOffset, result.spanOffset + result.spanLength),
+    );
+    assert.equal(token, expectedToken, `span should cover "${expectedToken}" in: ${source}`);
+  }
 }
 
 {
@@ -181,7 +186,8 @@ for (const [source, code] of failures) {
 
   const failed = await compileIncrement(": retry ( -- i32 ) missing ;");
   const retried = await compileIncrement(": retry ( -- i32 ) answer ;");
-  assert.equal(failed.status, 260);
+  assert.equal(failed.status, 3);
+  assert.equal(decodeError(failed.bytes), "unknown name: `missing`");
   assert.equal(retried.status, 0, "a failed incremental definition must be rolled back");
   assert.equal(retried.instances[0].exports.retry(), 42);
 }

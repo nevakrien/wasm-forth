@@ -15,8 +15,16 @@ const result = spawnSync(binary, [], { input: source, encoding: "utf8" });
 assert.equal(result.status, 0, result.stderr);
 assert.deepEqual(
   result.stdout.trim().split("\n"),
-  expected.map(({ status, values = [], code }) =>
-    [status, ...values, ...(code === undefined ? [] : [code])].join(" "),
+  expected.map(({ status, values = [], message }) =>
+    [status, ...values, ...(message === undefined ? [] : [message])].join(" "),
   ),
 );
+const ansiStrip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+const stderr = ansiStrip(result.stderr);
+for (const outcome of expected) {
+  if (outcome.token) {
+    assert.ok(stderr.includes(outcome.token), `${runtime}: ariadne output should contain "${outcome.token}"`);
+    assert.ok(stderr.includes(": bad ( -- i32 ) missing ;"), `${runtime}: ariadne should show the source line`);
+  }
+}
 console.log(`${runtime} REPL tests passed`);

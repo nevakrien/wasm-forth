@@ -168,6 +168,23 @@
       .dim { color: var(--muted); }
       .value { color: var(--ember); font-size: 1.15em; }
 
+      .error-report {
+        margin: 0.4rem 0;
+        padding: 0.5rem 0.8rem;
+        border-left: 3px solid var(--error);
+        background: rgba(255, 107, 105, 0.06);
+      }
+      .error-message { color: var(--error); font-weight: 600; }
+      .error-body {
+        margin: 0.3rem 0 0;
+        white-space: pre;
+        overflow-x: auto;
+        font-size: 0.82rem;
+        line-height: 1.65;
+      }
+      .error-gutter { color: var(--muted); user-select: none; }
+      .error-caret { color: var(--error); }
+
       #modules { padding: 0 1rem 1rem; }
       .module {
         margin-bottom: 0.65rem;
@@ -246,24 +263,6 @@
         "run-add": "20 22 sum",
       };
 
-      const errorNames = {
-        2: "unexpected token or end of input",
-        3: "nested definition",
-        4: "unknown name",
-        5: "type-stack underflow",
-        6: "empty definition",
-        7: "unknown export",
-        8: "integer overflow",
-        9: "duplicate definition",
-        10: "compiler limit exceeded",
-        11: "invalid input or allocation failure",
-        12: "unsupported signature type",
-        13: "final signature mismatch",
-        14: "duplicate or reserved local name",
-        15: "unknown local name",
-        16: "local name requires @, !, or !@",
-      };
-
       const source = document.querySelector("#source");
       const output = document.querySelector("#output");
       const modules = document.querySelector("#modules");
@@ -305,23 +304,7 @@
         return found;
       }
 
-      function decodeError(bytes) {
-        if (bytes.length !== 28 || decoder.decode(bytes.subarray(0, 4)) !== "WFCE") {
-          return { code: 0, offset: 0, span: 0, message: "invalid compiler error record" };
-        }
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        const code = view.getUint32(8, true);
-        return {
-          code,
-          offset: view.getUint32(12, true),
-          span: view.getUint32(16, true),
-          expected: view.getUint32(20, true),
-          actual: view.getUint32(24, true),
-          message: errorNames[code] ?? "unknown compiler error",
-        };
-      }
-
-      function sourceByteOffsetToIndex(text, byteOffset) {
+      function byteToJsIndex(text, byteOffset) {
         let bytes = 0;
         let index = 0;
         for (const character of text) {
@@ -331,6 +314,46 @@
           index += character.length;
         }
         return index;
+      }
+
+      function renderError(text, error) {
+        if (output.querySelector(".initial")) output.replaceChildren();
+        const report = document.createElement("div");
+        report.className = "error-report";
+        const msg = document.createElement("div");
+        msg.className = "error-message";
+        msg.textContent = error.message;
+        report.append(msg);
+        if (error.spanLength) {
+          const charStart = byteToJsIndex(text, error.spanOffset);
+          const charEnd = byteToJsIndex(text, error.spanOffset + error.spanLength);
+          const before = text.slice(0, charStart);
+          const lineNum = (before.match(/\n/g) || []).length + 1;
+          const col = charStart - (before.lastIndexOf("\n") + 1);
+          const lineStart = before.lastIndexOf("\n") + 1;
+          const lineEnd = text.indexOf("\n", charStart);
+          const lineText = lineEnd === -1 ? text.slice(lineStart) : text.slice(lineStart, lineEnd);
+          const tokenChars = charEnd - charStart;
+          const gutter = `${String(lineNum).padStart(3)} | `;
+          const pad = " ".repeat(gutter.length);
+          const caret = " ".repeat(col) + "^".repeat(tokenChars);
+          const body = document.createElement("div");
+          body.className = "error-body";
+          const g1 = document.createElement("span");
+          g1.className = "error-gutter";
+          g1.textContent = gutter;
+          const code = document.createTextNode(lineText);
+          const br = document.createTextNode("\n");
+          const g2 = document.createElement("span");
+          g2.className = "error-gutter";
+          g2.textContent = pad;
+          const caretEl = document.createElement("span");
+          caretEl.className = "error-caret";
+          caretEl.textContent = caret;
+          body.append(g1, code, br, g2, caretEl);
+          report.append(body);
+        }
+        output.append(report);
       }
 
       function renderModules() {
@@ -387,14 +410,10 @@
         }
 
         if (result.response[0] !== 0 && !result.execution) {
-          const problem = decodeError(result.payloadBytes);
-          const start = sourceByteOffsetToIndex(text, problem.offset);
-          const end = sourceByteOffsetToIndex(text, problem.offset + problem.span);
-          source.focus();
-          source.setSelectionRange(start, Math.max(start + 1, end));
-          const error = new Error(`${problem.message} at byte ${problem.offset}`);
-          error.compilerProblem = problem;
-          throw error;
+          const err = new Error(decoder.decode(result.payloadBytes) || "compiler returned an empty error");
+          err.spanOffset = result.spanOffset;
+          err.spanLength = result.spanLength;
+          throw err;
         }
 
         renderModules();
@@ -435,12 +454,16 @@
           source.value = "";
           source.focus();
         } catch (error) {
-          const lines = [{ text: `ERROR  ${error.message}`, className: "bad" }];
-          if (error.compilerProblem) {
-            const { expected, actual } = error.compilerProblem;
-            if (expected || actual) lines.push({ text: `expected ${expected}, actual ${actual}`, className: "dim" });
+          renderError(text, error);
+          if (error.spanLength) {
+            const start = byteToJsIndex(text, error.spanOffset);
+            const end = byteToJsIndex(text, error.spanOffset + error.spanLength);
+            source.value = text;
+            source.focus();
+            source.setSelectionRange(start, Math.max(start + 1, end));
+          } else {
+            source.focus();
           }
-          appendOutput(lines);
           setStatus("error", "error");
         } finally {
           busy = false;

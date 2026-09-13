@@ -1,5 +1,6 @@
 const INSTALL = 1;
 const RUN = 2;
+const ERROR = 3;
 
 export class ReplSession {
   constructor(compiler) {
@@ -43,9 +44,16 @@ export class ReplSession {
       };
     }
 
-    const payloadBytes = response[0] >= 256 && response[2]
+    const payloadBytes = response[0] === ERROR && response[2]
       ? new Uint8Array(memory.buffer, response[1], response[2]).slice()
       : new Uint8Array();
-    return { response, installations, execution, payloadBytes };
+    let spanOffset = 0;
+    let spanLength = 0;
+    if (response[0] === ERROR && response[2]) {
+      const spanView = new DataView(memory.buffer);
+      spanOffset = spanView.getUint32(256, true);
+      spanLength = spanView.getUint32(260, true);
+    }
+    return { response, installations, execution, payloadBytes, spanOffset, spanLength };
   }
 }

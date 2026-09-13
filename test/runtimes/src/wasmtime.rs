@@ -1,15 +1,18 @@
 use std::{
     fs,
     io::{self, BufRead, IsTerminal, Write},
+    ops::Range,
     path::PathBuf,
 };
 
 use anyhow::{Context, Result, ensure};
+use ariadne::{Color, Config, Label, Report, ReportKind, Source};
 use wasmtime::{Engine, Linker, Memory, Module, Ref, Store, Table, TypedFunc};
 
 const READY: i32 = 0;
 const INSTALL: i32 = 1;
 const RUN: i32 = 2;
+const ERROR: i32 = 3;
 
 struct Compiler {
     engine: Engine,
@@ -95,12 +98,21 @@ impl Compiler {
             .collect()
     }
 
-    fn error_code(&mut self, response: (i32, i32, i32)) -> Result<u32> {
-        ensure!(response.2 >= 12, "compiler returned a truncated error");
-        let mut bytes = [0; 4];
+    fn error_message(&mut self, response: (i32, i32, i32)) -> Result<String> {
+        let mut bytes = vec![0; response.2 as usize];
         self.memory
-            .read(&self.store, response.1 as usize + 8, &mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
+            .read(&self.store, response.1 as usize, &mut bytes)?;
+        String::from_utf8(bytes).context("compiler error is not UTF-8")
+    }
+
+    fn error_span(&self) -> (usize, usize) {
+        let mut bytes = [0u8; 8];
+        self.memory
+            .read(&self.store, 256, &mut bytes)
+            .expect("read error span");
+        let offset = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        let span = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        (offset, span)
     }
 }
 
@@ -140,7 +152,22 @@ fn main() -> Result<()> {
                 }
                 println!();
             }
-            status if status >= 256 => println!("ERROR {}", compiler.error_code(response)?),
+            ERROR => {
+                let message = compiler.error_message(response)?;
+                let (off, sp) = compiler.error_span();
+                if sp > 0 {
+                    let src = source.trim_end();
+                    let span: Range<usize> = off..off + sp;
+                    Report::build(ReportKind::Error, (), off)
+                        .with_config(Config::default().with_color(interactive))
+                        .with_label(Label::new(span).with_color(Color::Red))
+                        .with_message(&message)
+                        .finish()
+                        .write(Source::from(src), io::stderr())
+                        .unwrap();
+                }
+                println!("ERROR {message}");
+            }
             status => anyhow::bail!("unexpected compiler status {status}"),
         }
     }

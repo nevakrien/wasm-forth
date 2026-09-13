@@ -126,7 +126,7 @@ For each source chunk:
 4. While the returned status is `INSTALL`, copy the module bytes out of compiler
    memory, instantiate them with the compiler's memory and table, then call
    `resume`.
-5. Handle the final `READY`, `RUN`, or error response.
+5. Handle the final `READY`, `RUN`, or `ERROR` response.
 
 The response statuses are:
 
@@ -135,7 +135,7 @@ The response statuses are:
 | `0` | `READY` | The chunk is complete. Wait for another chunk. |
 | `1` | `INSTALL` | Instantiate the module payload, then call `resume`. |
 | `2` | `RUN` | Call the nullary function at table slot `payload`. |
-| `>= 256` | Error | Copy and decode the structured error payload. |
+| `3` | `ERROR` | Decode and render the UTF-8 diagnostic payload. |
 
 An adapter loop is equivalent to:
 
@@ -157,14 +157,14 @@ submit(source):
         value = function()
         return value
 
-    if response.status >= 256:
-        error = copy compiler.memory[response.payload..response.payload_length]
-        return decode(error)
+    if response.status == ERROR:
+        message = copy compiler.memory[response.payload..response.payload_length]
+        return decode_utf8(message)
 
     return READY
 ```
 
-Copy an `INSTALL` or error payload before the next compiler call. Returned
+Copy an `INSTALL` or `ERROR` payload before the next compiler call. Returned
 pointers refer to compiler-owned memory and are only guaranteed to remain valid
 until the next `reset`; compilation and extension instantiation can also grow
 memory, invalidating cached host views such as JavaScript `Uint8Array` objects.
@@ -217,15 +217,16 @@ console.assert(result.execution.value === 42);
 
 Each installation is also returned in `result.installations`, including its
 copied bytes, compiled module, and instance. On `RUN`, `result.execution`
-contains the table slot, result count, and invoked value. On a compiler error,
-`result.payloadBytes` contains a stable copy of the structured error record.
+contains the table slot, result count, and invoked value. On `ERROR`,
+`result.payloadBytes` contains a stable copy of the compiler-authored UTF-8
+diagnostic.
 
 ## Native adapters
 
 The wasmi and Wasmtime adapters follow the same state machine with runtime-
 specific APIs. They are also usable line-oriented REPL binaries: each non-empty
 stdin line is one source chunk, and each output line is `READY`, `RUN` followed
-by its i32 results, or `ERROR` followed by the structured error code.
+by its i32 results, or `ERROR` followed by the compiler-authored diagnostic.
 
 ```sh
 make repl-wasmi

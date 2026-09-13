@@ -22,7 +22,13 @@ test("runs the shared persistent REPL fixture", async ({ page }) => {
     const outcome = expected[index];
     if (outcome.status === "ERROR") {
       await expect(page.locator("#status")).toHaveText("error");
-      await expect(page.locator("#output .bad").last()).toContainText(outcome.message);
+      await expect(page.locator("#output .error-message").last()).toContainText(outcome.message);
+      if (outcome.token) {
+        const value = await page.locator("#source").inputValue();
+        const start = await page.locator("#source").evaluate((el) => el.selectionStart);
+        const end = await page.locator("#source").evaluate((el) => el.selectionEnd);
+        expect(value.slice(start, end)).toBe(outcome.token);
+      }
     } else {
       await expect(page.locator("#status")).toHaveText("ready");
       if (outcome.status === "RUN") {

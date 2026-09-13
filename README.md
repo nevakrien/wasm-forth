@@ -126,7 +126,7 @@ The compiler exports `memory`, `table`, `reset`, `alloc`, `compile`, and
 | `0` | `READY`: source consumed; payload and length are zero |
 | `1` | `INSTALL`: payload is one extension module |
 | `2` | `RUN`: payload is an ephemeral function's table slot; length is its result count |
-| `>= 256` | compilation error; payload is a 28-byte `WFCE` record |
+| `3` | `ERROR`: payload is a compiler-authored UTF-8 diagnostic |
 
 On `INSTALL`, instantiate the bytes with the compiler-owned objects and then
 call `resume`:
@@ -148,24 +148,10 @@ The compiler stops scanning exactly after each `;`, so no later source is
 processed until the host has installed that definition. There is no final
 program module.
 
-The little-endian error record is:
-
-| Offset | Field |
-| ---: | --- |
-| 0 | ASCII `WFCE` |
-| 4 | format version (`1`) |
-| 8 | error code (status minus 256) |
-| 12 | source byte offset |
-| 16 | token byte length |
-| 20 | expected tag or count |
-| 24 | actual tag or count |
-
-Current error codes are: `2` unexpected end/token, `3` nested definition, `4`
-unknown name, `5` type-stack underflow, `6` empty definition, `7` unknown
-export, `8` integer overflow, `9` duplicate definition, `10` compiler limit,
-`11` invalid input/allocation failure, `12` unsupported/invalid signature type,
-`13` final signature mismatch, `14` duplicate/reserved local name, `15` unknown
-local name, and `16` missing local operation prefix.
+Error messages are generated inside the compiler module rather than reconstructed
+from numeric codes by each adapter. When a source token caused the failure, the
+diagnostic contains that exact source span, for example
+`unknown name: \`missing\``. Adapters can render the payload directly.
 
 The bootstrap currently reserves table slots 0-15 for compiler actions and
 limits runtime definitions to 240, the semantic type stack and local context to

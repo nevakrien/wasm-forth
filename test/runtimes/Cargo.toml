@@ -16,5 +16,6 @@ required-features = ["wasmtime"]
 
 [dependencies]
 anyhow = "1.0.99"
+ariadne = "0.4"
 wasmi = { version = "0.51.1", optional = true }
 wasmtime = { version = "36.0.2", default-features = false, features = ["cranelift", "runtime"], optional = true }

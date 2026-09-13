@@ -109,7 +109,9 @@ The host calls `reset`, allocates and writes the source bytes, then calls
 `compile`. A ready status means the source was consumed. An install status means
 the payload is a generated extension module; the host instantiates it with the
 compiler's exported memory and table and calls `resume`. On failure, the
-payload is a serialized structured error. Returned pointers remain valid until
+payload is a compiler-authored UTF-8 diagnostic containing the actual failing
+source span when one exists. Error codes and byte locations remain internal
+compiler state rather than part of the embedding contract. Returned pointers remain valid until
 the next `reset`. The first page contains bootstrap state and zero is reserved
 as an allocation-failure sentinel. This is not a C ABI: there is no implicit
 stack pointer, stack frame layout, allocator contract, or null-terminated
