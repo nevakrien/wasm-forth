@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>wasm-forth workspace</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ink: #e8ead7;
+        --muted: #929985;
+        --paper: #10130f;
+        --panel: #171b15;
+        --line: #3a4134;
+        --acid: #c7f36b;
+        --ember: #ff8b4a;
+        --error: #ff6b69;
+        font-family: "IBM Plex Mono", "Cascadia Mono", "Liberation Mono", monospace;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(rgba(199, 243, 107, 0.025) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(199, 243, 107, 0.025) 1px, transparent 1px),
+          var(--paper);
+        background-size: 28px 28px;
+      }
+
+      button, input, select, textarea { font: inherit; }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 4.5rem;
+        padding: 0.9rem clamp(1rem, 3vw, 2.5rem);
+        border-bottom: 1px solid var(--line);
+        background: rgba(16, 19, 15, 0.92);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.15rem, 3vw, 1.65rem);
+        font-weight: 600;
+        letter-spacing: -0.04em;
+      }
+
+      h1 span { color: var(--acid); }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .status::before {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: var(--ember);
+        content: "";
+        box-shadow: 0 0 0.7rem var(--ember);
+      }
+
+      .status.ready::before { background: var(--acid); box-shadow: 0 0 0.7rem var(--acid); }
+      .status.error::before { background: var(--error); box-shadow: 0 0 0.7rem var(--error); }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(19rem, 0.75fr);
+        min-height: calc(100vh - 4.5rem);
+      }
+
+      .workbench { display: flex; min-width: 0; flex-direction: column; }
+      .side { min-width: 0; border-left: 1px solid var(--line); background: rgba(23, 27, 21, 0.86); }
+
+      .toolbar, .runbar {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .toolbar { justify-content: space-between; }
+      .toolbar-group { display: flex; gap: 0.55rem; }
+
+      button, select, input {
+        min-height: 2.35rem;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        background: #11150f;
+      }
+
+      button {
+        padding: 0.45rem 0.8rem;
+        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-size: 0.75rem;
+      }
+
+      button:hover:not(:disabled) { border-color: var(--acid); color: var(--acid); }
+      button:disabled { cursor: wait; opacity: 0.45; }
+      button.primary { border-color: var(--acid); color: #10130f; background: var(--acid); font-weight: 700; }
+      button.primary:hover:not(:disabled) { color: #10130f; background: #dcff92; }
+
+      select { max-width: 12rem; padding: 0.4rem 2rem 0.4rem 0.6rem; }
+
+      .editor-wrap { position: relative; flex: 1; min-height: 24rem; }
+
+      textarea {
+        width: 100%;
+        height: 100%;
+        min-height: 24rem;
+        resize: none;
+        border: 0;
+        outline: 0;
+        padding: clamp(1.2rem, 3vw, 2.5rem);
+        color: var(--ink);
+        background: rgba(10, 13, 9, 0.7);
+        font-size: clamp(0.9rem, 1.6vw, 1.08rem);
+        line-height: 1.75;
+        tab-size: 2;
+        caret-color: var(--acid);
+      }
+
+      textarea::selection { color: #10130f; background: var(--error); }
+
+      .runbar { flex-wrap: wrap; border-top: 1px solid var(--line); border-bottom: 0; }
+      .field { display: flex; flex: 1; min-width: 10rem; align-items: center; gap: 0.5rem; }
+      .field label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; }
+      .field input { width: 100%; min-width: 0; padding: 0.4rem 0.6rem; outline: 0; }
+      .field input:focus { border-color: var(--acid); }
+
+      .section { border-bottom: 1px solid var(--line); }
+      .section-title {
+        margin: 0;
+        padding: 0.9rem 1rem;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+      }
+
+      #output {
+        min-height: 12rem;
+        margin: 0;
+        padding: 0 1rem 1rem;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+        font-size: 0.82rem;
+        line-height: 1.65;
+      }
+
+      .ok { color: var(--acid); }
+      .bad { color: var(--error); }
+      .dim { color: var(--muted); }
+      .value { color: var(--ember); font-size: 1.15em; }
+
+      #modules { padding: 0 1rem 1rem; }
+      .module {
+        margin-bottom: 0.65rem;
+        padding: 0.8rem;
+        border: 1px solid var(--line);
+        background: #11150f;
+      }
+
+      .module-head { display: flex; justify-content: space-between; gap: 1rem; }
+      .module-name { color: var(--acid); }
+      .module-size { color: var(--muted); font-size: 0.72rem; }
+      .signature { margin-top: 0.45rem; color: var(--muted); font-size: 0.75rem; }
+      .empty { color: var(--muted); font-size: 0.8rem; }
+
+      .hint { padding: 1rem; color: var(--muted); font-size: 0.72rem; line-height: 1.6; }
+      kbd { padding: 0.1rem 0.3rem; border: 1px solid var(--line); color: var(--ink); background: #0d100c; }
+
+      @media (max-width: 780px) {
+        main { grid-template-columns: 1fr; }
+        .side { border-top: 1px solid var(--line); border-left: 0; }
+        .editor-wrap, textarea { min-height: 45vh; }
+        .toolbar { align-items: stretch; flex-direction: column; }
+        .toolbar-group { justify-content: space-between; }
+        select { max-width: none; flex: 1; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1><span>wasm</span>-forth / workspace</h1>
+      <div id="status" class="status">loading compiler</div>
+    </header>
+    <main>
+      <section class="workbench" aria-label="Source editor">
+        <div class="toolbar">
+          <select id="examples" aria-label="Load example">
+            <option value="forty">define forty</option>
+            <option value="answer">define answer</option>
+            <option value="run-answer">run answer</option>
+            <option value="add">define add</option>
+            <option value="run-add">run add</option>
+          </select>
+          <div class="toolbar-group">
+            <button id="reset" type="button">Reset session</button>
+            <button id="submit" class="primary" type="button">Submit</button>
+          </div>
+        </div>
+        <div class="editor-wrap">
+          <textarea id="source" aria-label="wasm-forth input" spellcheck="false">: forty ( -- i32 ) 40 ;</textarea>
+        </div>
+        <div class="runbar"><span class="dim">Definitions persist. To run a word, enter its arguments followed by its name, such as <code>20 22 add</code>.</span></div>
+      </section>
+      <aside class="side">
+        <section class="section">
+          <h2 class="section-title">Output</h2>
+          <div id="output" role="log" aria-live="polite"><span class="dim">Waiting for compiler...</span></div>
+        </section>
+        <section class="section">
+          <h2 class="section-title">Generated modules</h2>
+          <div id="modules"><div class="empty">Nothing compiled yet.</div></div>
+        </section>
+        <div class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> submits the prompt. Each definition becomes a real Wasm module and remains available to later submissions.</div>
+      </aside>
+    </main>
+
+    <script type="module">
+      const examples = {
+        forty: ": forty ( -- i32 ) 40 ;",
+        answer: {
+          source: ": answer ( -- i32 ) forty 2 i32.add ;",
+        },
+        "run-answer": "answer",
+        add: ": add ( i32 i32 -- i32 ) i32.add ;",
+        "run-add": "20 22 add",
+      };
+
+      const errorNames = {
+        2: "unexpected token or end of input",
+        3: "nested definition",
+        4: "unknown name",
+        5: "type-stack underflow",
+        6: "empty definition",
+        7: "unknown export",
+        8: "integer overflow",
+        9: "duplicate definition",
+        10: "compiler limit exceeded",
+        11: "invalid input or allocation failure",
+        12: "unsupported signature type",
+        13: "final signature mismatch",
+      };
+
+      const source = document.querySelector("#source");
+      const output = document.querySelector("#output");
+      const modules = document.querySelector("#modules");
+      const status = document.querySelector("#status");
+      const resetButton = document.querySelector("#reset");
+      const submitButton = document.querySelector("#submit");
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      let compiler;
+      let busy = false;
+      let compiledFunctions = new Map();
+      let moduleRecords = [];
+
+      function setStatus(text, state = "") {
+        status.textContent = text;
+        status.className = `status ${state}`;
+      }
+
+      function appendOutput(lines) {
+        if (output.querySelector(".initial")) output.replaceChildren();
+        for (const { text, className = "" } of lines) {
+          const line = document.createElement("div");
+          line.className = className;
+          line.textContent = text;
+          output.append(line);
+        }
+      }
+
+      function signatures(text) {
+        const found = [];
+        const pattern = /:\s+([^\s()]+)\s*\(\s*([^)]*?)\s*--\s*([^)]*?)\)/g;
+        for (const match of text.matchAll(pattern)) {
+          found.push({
+            name: match[1],
+            params: match[2].trim() ? match[2].trim().split(/\s+/) : [],
+            results: match[3].trim() ? match[3].trim().split(/\s+/) : [],
+          });
+        }
+        return found;
+      }
+
+      function decodeError(payload, length) {
+        const bytes = new Uint8Array(compiler.exports.memory.buffer, payload, length);
+        if (length !== 28 || decoder.decode(bytes.subarray(0, 4)) !== "WFCE") {
+          return { code: 0, offset: 0, span: 0, message: "invalid compiler error record" };
+        }
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const code = view.getUint32(8, true);
+        return {
+          code,
+          offset: view.getUint32(12, true),
+          span: view.getUint32(16, true),
+          expected: view.getUint32(20, true),
+          actual: view.getUint32(24, true),
+          message: errorNames[code] ?? "unknown compiler error",
+        };
+      }
+
+      function sourceByteOffsetToIndex(text, byteOffset) {
+        let bytes = 0;
+        let index = 0;
+        for (const character of text) {
+          const width = encoder.encode(character).length;
+          if (bytes + width > byteOffset) break;
+          bytes += width;
+          index += character.length;
+        }
+        return index;
+      }
+
+      function renderModules() {
+        modules.replaceChildren();
+        if (!moduleRecords.length) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No modules generated.";
+          modules.append(empty);
+          return;
+        }
+        for (const [index, record] of moduleRecords.entries()) {
+          const card = document.createElement("div");
+          card.className = "module";
+          const head = document.createElement("div");
+          head.className = "module-head";
+          const name = document.createElement("span");
+          name.className = "module-name";
+          name.textContent = record.signature?.name ?? `module ${index + 1}`;
+          const size = document.createElement("span");
+          size.className = "module-size";
+          size.textContent = `${record.byteLength} bytes`;
+          head.append(name, size);
+          card.append(head);
+          if (record.signature) {
+            const signature = document.createElement("div");
+            signature.className = "signature";
+            signature.textContent = `( ${record.signature.params.join(" ")} -- ${record.signature.results.join(" ")} )`;
+            card.append(signature);
+          }
+          modules.append(card);
+        }
+      }
+
+      async function compileSnippet(text) {
+        const bytes = encoder.encode(text);
+        const { memory, table, alloc, compile, resume } = compiler.exports;
+        const pointer = alloc(bytes.length);
+        if (!pointer && bytes.length) throw new Error("compiler could not allocate the source buffer");
+        new Uint8Array(memory.buffer, pointer, bytes.length).set(bytes);
+
+        const declared = signatures(text);
+        const records = [];
+        let response = compile(pointer, bytes.length);
+        while (response[0] === 1) {
+          const moduleBytes = new Uint8Array(memory.buffer, response[1], response[2]).slice();
+          const wasmModule = await WebAssembly.compile(moduleBytes);
+          const instance = await WebAssembly.instantiate(wasmModule, {
+            "wasm-forth": { memory, table },
+          });
+          const signature = declared[records.length];
+          const record = { byteLength: moduleBytes.length, signature, instance };
+          records.push(record);
+          moduleRecords.push(record);
+          for (const [name, value] of Object.entries(instance.exports)) {
+            if (typeof value === "function") compiledFunctions.set(name, { value, signature });
+          }
+          response = resume();
+        }
+
+        if (response[0] !== 0) {
+          const problem = decodeError(response[1], response[2]);
+          const start = sourceByteOffsetToIndex(text, problem.offset);
+          const end = sourceByteOffsetToIndex(text, problem.offset + problem.span);
+          source.focus();
+          source.setSelectionRange(start, Math.max(start + 1, end));
+          const error = new Error(`${problem.message} at byte ${problem.offset}`);
+          error.compilerProblem = problem;
+          throw error;
+        }
+
+        renderModules();
+        return records;
+      }
+
+      function parseArguments(text) {
+        if (!text.trim()) return [];
+        return text.trim().split(/[\s,]+/).map((value) => {
+          if (!/^-?\d+$/.test(value)) throw new Error(`invalid i32 argument: ${value}`);
+          const number = Number(value);
+          if (!Number.isInteger(number) || number < -2147483648 || number > 2147483647) {
+            throw new Error(`i32 argument out of range: ${value}`);
+          }
+          return number;
+        });
+      }
+
+      function formatValue(value) {
+        if (Array.isArray(value)) return `[ ${value.map(formatValue).join(", ")} ]`;
+        if (typeof value === "bigint") return `${value}n`;
+        if (value === undefined) return "( no results )";
+        return String(value);
+      }
+
+      function invoke(text) {
+        const tokens = text.trim().split(/\s+/);
+        const name = tokens.pop();
+        const callable = compiledFunctions.get(name);
+        if (!callable) throw new Error(`unknown word '${name}'`);
+        const args = parseArguments(tokens.join(" "));
+        const expected = callable.signature?.params.length;
+        if (expected !== undefined && args.length !== expected) {
+          throw new Error(`${name} expects ${expected} argument${expected === 1 ? "" : "s"}, received ${args.length}`);
+        }
+        return { name, args, value: callable.value(...args) };
+      }
+
+      async function submit() {
+        if (!compiler || busy) return;
+        const text = source.value.trim();
+        if (!text) return;
+        busy = true;
+        resetButton.disabled = true;
+        submitButton.disabled = true;
+        setStatus("working");
+        appendOutput([{ text: `> ${text.replace(/\s+/g, " ")}`, className: "dim" }]);
+        try {
+          if (text.startsWith(":") || text.startsWith("export ")) {
+            const records = await compileSnippet(text);
+            appendOutput([{ text: `defined ${records.map((record) => record.signature?.name).filter(Boolean).join(", ")}`, className: "ok" }]);
+          } else {
+            const { name, args, value } = invoke(text);
+            appendOutput([
+              { text: `${name}(${args.join(", ")})`, className: "dim" },
+              { text: formatValue(value), className: "value" },
+            ]);
+          }
+          setStatus("ready", "ready");
+          source.value = "";
+          source.focus();
+        } catch (error) {
+          const lines = [{ text: `ERROR  ${error.message}`, className: "bad" }];
+          if (error.compilerProblem) {
+            const { expected, actual } = error.compilerProblem;
+            if (expected || actual) lines.push({ text: `expected ${expected}, actual ${actual}`, className: "dim" });
+          }
+          appendOutput(lines);
+          setStatus("error", "error");
+        } finally {
+          busy = false;
+          resetButton.disabled = false;
+          submitButton.disabled = false;
+        }
+      }
+
+      function resetSession() {
+        if (!compiler || busy) return;
+        compiler.exports.reset();
+        compiledFunctions = new Map();
+        moduleRecords = [];
+        renderModules();
+        output.replaceChildren();
+        const line = document.createElement("div");
+        line.className = "dim initial";
+        line.textContent = "Session reset. Define a word to begin.";
+        output.append(line);
+        source.value = ": forty ( -- i32 ) 40 ;";
+        source.focus();
+        setStatus("ready", "ready");
+      }
+
+      document.querySelector("#examples").addEventListener("change", (event) => {
+        const example = examples[event.target.value];
+        source.value = typeof example === "string" ? example : example.source;
+        source.focus();
+      });
+      resetButton.addEventListener("click", resetSession);
+      submitButton.addEventListener("click", submit);
+      source.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          submit();
+        }
+      });
+
+      try {
+        const response = await fetch("../build/compiler.wasm");
+        if (!response.ok) throw new Error(`compiler request returned HTTP ${response.status}`);
+        const bytes = await response.arrayBuffer();
+        ({ instance: compiler } = await WebAssembly.instantiate(bytes));
+        compiler.exports.reset();
+        setStatus("ready", "ready");
+        output.innerHTML = '<div class="dim initial">Compiler loaded. Define <code>forty</code>, then define <code>answer</code>, then submit <code>answer</code>.</div>';
+      } catch (error) {
+        setStatus("load failed", "error");
+        appendOutput([
+          { text: `ERROR  ${error.message}`, className: "bad" },
+          { text: "Run `make` and serve the repository root over HTTP.", className: "dim" },
+        ]);
+      }
+    </script>
+  </body>
+</html>
