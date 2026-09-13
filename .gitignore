@@ -43,6 +43,8 @@
 build/
 Build/
 build-*/
+node_modules/
+target/
 
 # CMake generated files
 CMakeFiles/
@@ -68,3 +70,5 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+playwright-report/
+test-results/

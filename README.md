@@ -46,15 +46,55 @@ exports the function under its source name. Calls across modules use typed
 
 ## Build and test
 
-WABT's `wat2wasm` and Node.js are the current development dependencies.
+WABT's `wat2wasm` and Node.js are the core development dependencies.
 
 ```sh
 make test
 ```
 
 This assembles `compiler/compiler.wat`, drives the instantiate-and-resume
-protocol from Node, validates and instantiates every generated extension, and
-checks execution and structured failures.
+protocol on Node, wasmi, Wasmtime, Chromium, and Firefox, validates and
+instantiates every generated extension, and checks execution and structured
+failures. Rust, the npm development dependencies, and Playwright's Chromium and
+Firefox installations are required for the complete default suite.
+
+The native-only subset tests Node, wasmi, and Wasmtime:
+
+```sh
+make test-runtimes
+```
+
+Individual engines can be selected with `make test-node`, `make test-wasmi`,
+or `make test-wasmtime`. The native cases execute a typed cross-module call,
+single- and multi-result top-level expressions, and a structured compilation
+failure. The cross-module case submits two definitions and the expression that
+calls them as three separate chunks in one persistent compiler session, then
+invokes the slot returned by `RUN`. CI runs all three engines.
+
+All five runtimes consume the same line-delimited conformance source at
+`test/fixtures/repl.txt`; expected outcomes live beside it in
+`test/fixtures/repl.expected.json`. Adding a chunk and its expected result there
+extends the shared runtime matrix.
+
+The native adapters can also be used as line-oriented development REPLs. Each
+non-empty input line is submitted as one persistent source chunk:
+
+```sh
+make repl-wasmi
+make repl-wasmtime
+```
+
+The browser workspace and Node tests share `browser/repl.mjs`, which implements
+the source-chunk, `INSTALL`, instantiate, `resume`, and `RUN` lifecycle. The
+browser test drives that workspace through the same three-chunk REPL flow
+headlessly on Chromium and Firefox in CI.
+After installing the development dependencies and browsers with `npm ci` and
+`npx playwright install chromium firefox`, run either engine locally with:
+
+```sh
+make test-browser BROWSER=chromium
+make test-browser BROWSER=firefox
+```
 
 To build the compiler, start a local server, and open the browser workspace:
 
@@ -72,6 +112,10 @@ instantiate-and-resume protocol as the Node tests and has no server-side runtime
 component.
 
 ## Embedding ABI
+
+See [INTEGRATION.md](INTEGRATION.md) for the complete adapter state machine,
+object ownership rules, a persistent REPL example, and JavaScript and native
+runtime integration notes.
 
 The compiler exports `memory`, `table`, `reset`, `alloc`, `compile`, and
 `resume`. `compile(source, source_length)` and `resume()` return

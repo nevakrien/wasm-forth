@@ -446,6 +446,7 @@ Important targets:
 
 ```text
 iwasm / WAMR
+wasmi
 Wasmtime
 Chromium WebAssembly
 Firefox WebAssembly

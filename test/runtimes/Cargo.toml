@@ -1,0 +1,20 @@
+[package]
+name = "wasm-forth-runtime-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "wasmi-repl"
+path = "src/wasmi.rs"
+required-features = ["wasmi"]
+
+[[bin]]
+name = "wasmtime-repl"
+path = "src/wasmtime.rs"
+required-features = ["wasmtime"]
+
+[dependencies]
+anyhow = "1.0.99"
+wasmi = { version = "0.51.1", optional = true }
+wasmtime = { version = "36.0.2", default-features = false, features = ["cranelift", "runtime"], optional = true }

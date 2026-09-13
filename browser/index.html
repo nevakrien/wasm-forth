@@ -234,6 +234,8 @@
     </main>
 
     <script type="module">
+      import { ReplSession } from "./repl.mjs";
+
       const examples = {
         forty: ": forty ( -- i32 ) 40 ;",
         answer: {
@@ -271,6 +273,7 @@
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
       let compiler;
+      let repl;
       let busy = false;
       let moduleRecords = [];
 
@@ -302,9 +305,8 @@
         return found;
       }
 
-      function decodeError(payload, length) {
-        const bytes = new Uint8Array(compiler.exports.memory.buffer, payload, length);
-        if (length !== 28 || decoder.decode(bytes.subarray(0, 4)) !== "WFCE") {
+      function decodeError(bytes) {
+        if (bytes.length !== 28 || decoder.decode(bytes.subarray(0, 4)) !== "WFCE") {
           return { code: 0, offset: 0, span: 0, message: "invalid compiler error record" };
         }
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -364,44 +366,28 @@
       }
 
       async function compileSnippet(text) {
-        const bytes = encoder.encode(text);
-        const { memory, table, alloc, compile, resume } = compiler.exports;
-        const pointer = alloc(bytes.length);
-        if (!pointer && bytes.length) throw new Error("compiler could not allocate the source buffer");
-        new Uint8Array(memory.buffer, pointer, bytes.length).set(bytes);
-
         const declared = signatures(text);
-        const records = [];
-        let execution = null;
-        let response = compile(pointer, bytes.length);
-        while (response[0] === 1) {
-          const moduleBytes = new Uint8Array(memory.buffer, response[1], response[2]).slice();
-          const wasmModule = await WebAssembly.compile(moduleBytes);
-          const instance = await WebAssembly.instantiate(wasmModule, {
-            "wasm-forth": { memory, table },
-          });
-          const signature = declared[records.length];
-          const record = { byteLength: moduleBytes.length, signature, instance };
-          records.push(record);
-          moduleRecords.push(record);
-          response = resume();
-        }
+        const result = await repl.submit(text);
+        const records = result.installations.map(({ bytes, instance }, index) => ({
+          byteLength: bytes.length,
+          signature: declared[index],
+          instance,
+        }));
+        moduleRecords.push(...records);
 
-        if (response[0] === 2) {
+        if (result.execution) {
           const record = records.at(-1);
           if (record && !record.signature) {
             record.signature = {
               name: "<repl>",
               params: [],
-              results: Array(response[2]).fill("i32"),
+              results: Array(result.execution.resultCount).fill("i32"),
             };
           }
-          execution = { value: table.get(response[1])(), resultCount: response[2] };
-          response = [0, 0, 0];
         }
 
-        if (response[0] !== 0) {
-          const problem = decodeError(response[1], response[2]);
+        if (result.response[0] !== 0 && !result.execution) {
+          const problem = decodeError(result.payloadBytes);
           const start = sourceByteOffsetToIndex(text, problem.offset);
           const end = sourceByteOffsetToIndex(text, problem.offset + problem.span);
           source.focus();
@@ -412,7 +398,7 @@
         }
 
         renderModules();
-        return { records, execution };
+        return { records, execution: result.execution };
       }
 
       function formatValue(value) {
@@ -465,7 +451,7 @@
 
       function resetSession() {
         if (!compiler || busy) return;
-        compiler.exports.reset();
+        repl.reset();
         moduleRecords = [];
         renderModules();
         output.replaceChildren();
@@ -497,7 +483,8 @@
         if (!response.ok) throw new Error(`compiler request returned HTTP ${response.status}`);
         const bytes = await response.arrayBuffer();
         ({ instance: compiler } = await WebAssembly.instantiate(bytes));
-        compiler.exports.reset();
+        repl = new ReplSession(compiler);
+        repl.reset();
         setStatus("ready", "ready");
         output.innerHTML = '<div class="dim initial">Compiler loaded. Define <code>forty</code>, then define <code>answer</code>, then submit <code>answer</code>.</div>';
       } catch (error) {

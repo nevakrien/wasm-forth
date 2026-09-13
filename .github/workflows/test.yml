@@ -1,0 +1,53 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: ${{ matrix.runtime }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, wasmi, wasmtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WABT
+        run: sudo apt-get update && sudo apt-get install --yes wabt
+      - uses: actions/setup-node@v4
+        if: matrix.runtime == 'node'
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.runtime != 'node'
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.runtime != 'node'
+        with:
+          workspaces: test/runtimes
+      - name: Test ${{ matrix.runtime }}
+        run: make test-${{ matrix.runtime }}
+
+  browser:
+    name: ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WABT
+        run: sudo apt-get update && sudo apt-get install --yes wabt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Test ${{ matrix.browser }}
+        run: make test-browser BROWSER=${{ matrix.browser }}

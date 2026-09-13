@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { ReplSession } from "../browser/repl.mjs";
 
 const compilerBytes = await readFile(new URL("../build/compiler.wasm", import.meta.url));
 const { instance: compiler } = await WebAssembly.instantiate(compilerBytes);
-const { memory, table, reset, alloc, compile, resume } = compiler.exports;
-const encoder = new TextEncoder();
+const { table } = compiler.exports;
+const repl = new ReplSession(compiler);
+const replSource = await readFile(new URL("./fixtures/repl.txt", import.meta.url), "utf8");
+const replExpected = JSON.parse(
+  await readFile(new URL("./fixtures/repl.expected.json", import.meta.url), "utf8"),
+);
 
 function decodeError(bytes) {
   assert.equal(bytes.length, 28);
@@ -20,48 +25,29 @@ function decodeError(bytes) {
   };
 }
 
+function replChunks(text) {
+  return text.split(/\r?\n/).filter((line) => line.trim());
+}
+
 async function compileSource(text) {
-  reset();
-  const source = encoder.encode(text);
-  const pointer = alloc(source.length);
-  assert.notEqual(pointer, 0);
-  new Uint8Array(memory.buffer, pointer, source.length).set(source);
-  const instances = [];
-  const modules = [];
-  let response = compile(pointer, source.length);
-  while (response[0] === 1) {
-    const bytes = new Uint8Array(memory.buffer, response[1], response[2]).slice();
-    assert.equal(WebAssembly.validate(bytes), true);
-    modules.push(bytes);
-    const { instance } = await WebAssembly.instantiate(bytes, {
-      "wasm-forth": { memory, table },
-    });
-    instances.push(instance);
-    response = resume();
-  }
-  const [status, payload, length] = response;
-  const bytes = length
-    ? new Uint8Array(memory.buffer, payload, length).slice()
-    : new Uint8Array();
-  return { status, payload, length, bytes, instances, modules };
+  repl.reset();
+  return compileIncrement(text);
 }
 
 async function compileIncrement(text) {
-  const source = encoder.encode(text);
-  const pointer = alloc(source.length);
-  assert.notEqual(pointer, 0);
-  new Uint8Array(memory.buffer, pointer, source.length).set(source);
-  const instances = [];
-  let response = compile(pointer, source.length);
-  while (response[0] === 1) {
-    const bytes = new Uint8Array(memory.buffer, response[1], response[2]).slice();
-    const { instance } = await WebAssembly.instantiate(bytes, {
-      "wasm-forth": { memory, table },
-    });
-    instances.push(instance);
-    response = resume();
+  const result = await repl.submit(text);
+  for (const { bytes } of result.installations) {
+    assert.equal(WebAssembly.validate(bytes), true);
   }
-  return { status: response[0], payload: response[1], length: response[2], instances };
+  return {
+    status: result.response[0],
+    payload: result.response[1],
+    length: result.response[2],
+    bytes: result.payloadBytes,
+    instances: result.installations.map(({ instance }) => instance),
+    modules: result.installations.map(({ bytes }) => bytes),
+    execution: result.execution,
+  };
 }
 
 {
@@ -120,6 +106,7 @@ async function compileIncrement(text) {
   const result = await compileSource("1 2 add");
   assert.equal(result.status, 2);
   assert.equal(result.length, 1);
+  assert.equal(result.execution.value, 3);
   assert.equal(table.get(result.payload)(), 3);
 }
 
@@ -127,16 +114,30 @@ async function compileIncrement(text) {
   const result = await compileSource(": sum ( i32 i32 -- i32 ) add ; 20 22 sum");
   assert.equal(result.status, 2);
   assert.equal(result.instances.length, 2);
+  assert.equal(result.execution.value, 42);
   assert.equal(table.get(result.payload)(), 42);
 }
 
 {
-  reset();
-  const definition = await compileIncrement(": sum ( i32 i32 -- i32 ) add ;");
-  const evaluation = await compileIncrement("20 22 sum");
-  assert.equal(definition.status, 0);
-  assert.equal(evaluation.status, 2);
-  assert.equal(table.get(evaluation.payload)(), 42);
+  repl.reset();
+  const chunks = replChunks(replSource);
+  assert.equal(chunks.length, replExpected.length);
+  for (const [index, source] of chunks.entries()) {
+    const result = await compileIncrement(source);
+    const expected = replExpected[index];
+    if (expected.status === "READY") {
+      assert.equal(result.status, 0, source);
+    } else if (expected.status === "RUN") {
+      assert.equal(result.status, 2, source);
+      const values = Array.isArray(result.execution.value)
+        ? result.execution.value
+        : [result.execution.value];
+      assert.deepEqual(values, expected.values, source);
+    } else {
+      assert.ok(result.status >= 256, source);
+      assert.equal(decodeError(result.bytes).code, expected.code, source);
+    }
+  }
 }
 
 {
@@ -171,7 +172,7 @@ for (const [source, code] of failures) {
 }
 
 {
-  reset();
+  repl.reset();
   const forty = await compileIncrement(": forty ( -- i32 ) 40 ;");
   const answer = await compileIncrement(": answer ( -- i32 ) forty 2 i32.add ;");
   assert.equal(forty.status, 0);

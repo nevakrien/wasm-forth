@@ -1,0 +1,7 @@
+[
+  { "status": "READY" },
+  { "status": "READY" },
+  { "status": "RUN", "values": [42] },
+  { "status": "RUN", "values": [1, 2] },
+  { "status": "ERROR", "code": 4, "message": "unknown name" }
+]

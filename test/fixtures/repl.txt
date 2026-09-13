@@ -1,0 +1,5 @@
+: forty ( -- i32 ) 40 ;
+: answer ( -- i32 ) forty 2 i32.add ;
+answer
+1 2
+: bad ( -- i32 ) missing ;
