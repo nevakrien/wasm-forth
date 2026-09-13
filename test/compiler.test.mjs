@@ -61,7 +61,7 @@ async function compileIncrement(text) {
     instances.push(instance);
     response = resume();
   }
-  return { status: response[0], instances };
+  return { status: response[0], payload: response[1], length: response[2], instances };
 }
 
 {
@@ -85,17 +85,54 @@ async function compileIncrement(text) {
 
 {
   const result = await compileSource(
-    ": add ( i32 i32 -- i32 ) i32.add ; : pair ( i32 i32 -- i32 i32 ) 0 i32.add ;",
+    ": binary-add ( i32 i32 -- i32 ) i32.add ; : pair ( i32 i32 -- i32 i32 ) 0 i32.add ;",
   );
   assert.equal(result.status, 0);
-  assert.equal(result.instances[0].exports.add(20, 22), 42);
+  assert.equal(result.instances[0].exports["binary-add"](20, 22), 42);
   assert.deepEqual(result.instances[1].exports.pair(4, 5), [4, 5]);
+}
+
+{
+  const result = await compileSource(
+    ": sum ( i32 i32 -- i32 ) add ; " +
+    ": twice ( i32 -- i32 ) local x x x add ; " +
+    ": replace ( i32 i32 -- i32 ) local replacement local value replacement local.set value value ;",
+  );
+  assert.equal(result.status, 0);
+  assert.equal(result.instances[0].exports.sum(20, 22), 42);
+  assert.equal(result.instances[1].exports.twice(21), 42);
+  assert.equal(result.instances[2].exports.replace(10, 42), 42);
+  assert.equal(typeof table.get(0), "function", "generated modules must not overwrite compiler actions");
+  assert.equal(typeof table.get(16), "function", "runtime definitions start after reserved action slots");
 }
 
 {
   const result = await compileSource(": limits ( -- i32 i32 ) -2147483648 2147483647 ;");
   assert.equal(result.status, 0);
   assert.deepEqual(result.instances[0].exports.limits(), [-2147483648, 2147483647]);
+}
+
+{
+  const result = await compileSource("1 2 add");
+  assert.equal(result.status, 2);
+  assert.equal(result.length, 1);
+  assert.equal(table.get(result.payload)(), 3);
+}
+
+{
+  const result = await compileSource(": sum ( i32 i32 -- i32 ) add ; 20 22 sum");
+  assert.equal(result.status, 2);
+  assert.equal(result.instances.length, 2);
+  assert.equal(table.get(result.payload)(), 42);
+}
+
+{
+  reset();
+  const definition = await compileIncrement(": sum ( i32 i32 -- i32 ) add ;");
+  const evaluation = await compileIncrement("20 22 sum");
+  assert.equal(definition.status, 0);
+  assert.equal(evaluation.status, 2);
+  assert.equal(table.get(evaluation.payload)(), 42);
 }
 
 {
@@ -114,6 +151,11 @@ const failures = [
   ["export missing", 7],
   [": unfinished ( -- i32 ) 1", 2],
   [": bad ( f32 -- i32 ) 1 ;", 12],
+  [": bad ( -- i32 ) local x ;", 5],
+  [": bad ( i32 -- i32 ) local x 1 local x x ;", 14],
+  [": bad ( i32 -- i32 ) local.set missing 1 ;", 15],
+  [": add ( i32 i32 -- i32 ) i32.add ;", 9],
+  [": first ( i32 -- i32 ) local x x ; : second ( -- i32 ) x ;", 4],
 ];
 
 for (const [source, code] of failures) {

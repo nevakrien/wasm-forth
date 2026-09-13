@@ -17,7 +17,8 @@
 - Add string/data definitions using reserved shared-memory ranges and generated
   active data segments. Export immutable globals for addresses and lengths when
   external Wasm consumers need them.
-- Replace bootstrap hardcoded token dispatch with the canonical indirect
-  dictionary compiler-action ABI. Runtime definitions should share one typed
-  call action; non-function dictionary objects must be able to use distinct
-  compiler actions without consuming runtime table slots.
+- Complete the canonical dictionary compiler-action ABI. Bootstrap primitives
+  now dispatch indirectly through dictionary metadata; runtime definitions
+  should move to one shared typed call action, and non-function dictionary
+  objects must be able to use distinct compiler actions without consuming
+  runtime table slots.

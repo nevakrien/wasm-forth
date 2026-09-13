@@ -207,8 +207,8 @@
             <option value="forty">define forty</option>
             <option value="answer">define answer</option>
             <option value="run-answer">run answer</option>
-            <option value="add">define add</option>
-            <option value="run-add">run add</option>
+            <option value="add">define sum</option>
+            <option value="run-add">run sum</option>
           </select>
           <div class="toolbar-group">
             <button id="reset" type="button">Reset session</button>
@@ -218,7 +218,7 @@
         <div class="editor-wrap">
           <textarea id="source" aria-label="wasm-forth input" spellcheck="false">: forty ( -- i32 ) 40 ;</textarea>
         </div>
-        <div class="runbar"><span class="dim">Definitions persist. To run a word, enter its arguments followed by its name, such as <code>20 22 add</code>.</span></div>
+        <div class="runbar"><span class="dim">Definitions persist. To run a word, enter its arguments followed by its name, such as <code>20 22 sum</code>.</span></div>
       </section>
       <aside class="side">
         <section class="section">
@@ -240,8 +240,8 @@
           source: ": answer ( -- i32 ) forty 2 i32.add ;",
         },
         "run-answer": "answer",
-        add: ": add ( i32 i32 -- i32 ) i32.add ;",
-        "run-add": "20 22 add",
+        add: ": sum ( i32 i32 -- i32 ) add ;",
+        "run-add": "20 22 sum",
       };
 
       const errorNames = {
@@ -257,6 +257,8 @@
         11: "invalid input or allocation failure",
         12: "unsupported signature type",
         13: "final signature mismatch",
+        14: "duplicate or reserved local name",
+        15: "unknown local name",
       };
 
       const source = document.querySelector("#source");
@@ -269,7 +271,6 @@
       const decoder = new TextDecoder();
       let compiler;
       let busy = false;
-      let compiledFunctions = new Map();
       let moduleRecords = [];
 
       function setStatus(text, state = "") {
@@ -370,6 +371,7 @@
 
         const declared = signatures(text);
         const records = [];
+        let execution = null;
         let response = compile(pointer, bytes.length);
         while (response[0] === 1) {
           const moduleBytes = new Uint8Array(memory.buffer, response[1], response[2]).slice();
@@ -381,10 +383,20 @@
           const record = { byteLength: moduleBytes.length, signature, instance };
           records.push(record);
           moduleRecords.push(record);
-          for (const [name, value] of Object.entries(instance.exports)) {
-            if (typeof value === "function") compiledFunctions.set(name, { value, signature });
-          }
           response = resume();
+        }
+
+        if (response[0] === 2) {
+          const record = records.at(-1);
+          if (record && !record.signature) {
+            record.signature = {
+              name: "<repl>",
+              params: [],
+              results: Array(response[2]).fill("i32"),
+            };
+          }
+          execution = { value: table.get(response[1])(), resultCount: response[2] };
+          response = [0, 0, 0];
         }
 
         if (response[0] !== 0) {
@@ -399,19 +411,7 @@
         }
 
         renderModules();
-        return records;
-      }
-
-      function parseArguments(text) {
-        if (!text.trim()) return [];
-        return text.trim().split(/[\s,]+/).map((value) => {
-          if (!/^-?\d+$/.test(value)) throw new Error(`invalid i32 argument: ${value}`);
-          const number = Number(value);
-          if (!Number.isInteger(number) || number < -2147483648 || number > 2147483647) {
-            throw new Error(`i32 argument out of range: ${value}`);
-          }
-          return number;
-        });
+        return { records, execution };
       }
 
       function formatValue(value) {
@@ -419,19 +419,6 @@
         if (typeof value === "bigint") return `${value}n`;
         if (value === undefined) return "( no results )";
         return String(value);
-      }
-
-      function invoke(text) {
-        const tokens = text.trim().split(/\s+/);
-        const name = tokens.pop();
-        const callable = compiledFunctions.get(name);
-        if (!callable) throw new Error(`unknown word '${name}'`);
-        const args = parseArguments(tokens.join(" "));
-        const expected = callable.signature?.params.length;
-        if (expected !== undefined && args.length !== expected) {
-          throw new Error(`${name} expects ${expected} argument${expected === 1 ? "" : "s"}, received ${args.length}`);
-        }
-        return { name, args, value: callable.value(...args) };
       }
 
       async function submit() {
@@ -444,15 +431,18 @@
         setStatus("working");
         appendOutput([{ text: `> ${text.replace(/\s+/g, " ")}`, className: "dim" }]);
         try {
-          if (text.startsWith(":") || text.startsWith("export ")) {
-            const records = await compileSnippet(text);
-            appendOutput([{ text: `defined ${records.map((record) => record.signature?.name).filter(Boolean).join(", ")}`, className: "ok" }]);
-          } else {
-            const { name, args, value } = invoke(text);
-            appendOutput([
-              { text: `${name}(${args.join(", ")})`, className: "dim" },
-              { text: formatValue(value), className: "value" },
-            ]);
+          const { records, execution } = await compileSnippet(text);
+          const names = records
+            .map((record) => record.signature?.name)
+            .filter((name) => name && name !== "<repl>");
+          if (names.length) {
+            appendOutput([{ text: `defined ${names.join(", ")}`, className: "ok" }]);
+          }
+          if (execution) {
+            appendOutput([{ text: formatValue(execution.value), className: "value" }]);
+          }
+          if (!names.length && !execution) {
+            appendOutput([{ text: "accepted", className: "ok" }]);
           }
           setStatus("ready", "ready");
           source.value = "";
@@ -475,7 +465,6 @@
       function resetSession() {
         if (!compiler || busy) return;
         compiler.exports.reset();
-        compiledFunctions = new Map();
         moduleRecords = [];
         renderModules();
         output.replaceChildren();

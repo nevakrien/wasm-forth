@@ -115,6 +115,14 @@ as an allocation-failure sentinel. This is not a C ABI: there is no implicit
 stack pointer, stack frame layout, allocator contract, or null-terminated
 string convention.
 
+An interactive top-level expression is emitted as an ephemeral nullary
+extension function. After its install/resume cycle, a run status returns that
+function's table slot and result count so the host can invoke it and present the
+result. Its dictionary record is then discarded and its slot may be reused.
+This status is necessary because the import-free compiler cannot instantiate or
+invoke the extension itself, while the REPL must not emulate the Wasm operand
+stack in host code.
+
 This architecture is the default. Change it only in response to a concrete limitation demonstrated by an implementation or test, and record the reason here.
 
 ### Initial vertical slice

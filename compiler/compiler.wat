@@ -1,4 +1,5 @@
 (module
+  (type $compiler-action (func (param i32) (result i32 i32 i32)))
   ;; Page zero is compiler state. Host/source/output allocations start at page 1.
   (memory (export "memory") 2)
   (table (export "table") 256 funcref)
@@ -16,6 +17,9 @@
   (global $body-start (mut i32) (i32.const 0))
   (global $body-cursor (mut i32) (i32.const 0))
   (global $body-items (mut i32) (i32.const 0))
+  (global $locals (mut i32) (i32.const 0))
+  (global $repl-def (mut i32) (i32.const 0))
+  (global $pending-run (mut i32) (i32.const 0))
   (global $out (mut i32) (i32.const 0))
 
   ;; Definition record (24 bytes): name pointer, name length, table slot,
@@ -28,6 +32,10 @@
   (data (i32.const 53) ")")
   (data (i32.const 55) "--")
   (data (i32.const 58) "i32")
+  (data (i32.const 62) "add")
+  (data (i32.const 66) "local")
+  (data (i32.const 72) "local.set")
+  (data (i32.const 82) "__repl")
 
   (func $reset (export "reset")
     (global.set $heap (i32.const 65536))
@@ -36,7 +44,23 @@
     (global.set $source-end (i32.const 0))
     (global.set $defs (i32.const 0))
     (global.set $in-def (i32.const 0))
-    (global.set $depth (i32.const 0)))
+    (global.set $depth (i32.const 0))
+    (global.set $locals (i32.const 0))
+    (global.set $repl-def (i32.const 0))
+    (global.set $pending-run (i32.const 0))
+    ;; Primitive dictionary record: name pointer, name length, action table slot.
+    (i32.store (i32.const 512) (i32.const 43))
+    (i32.store (i32.const 516) (i32.const 7))
+    (i32.store (i32.const 520) (i32.const 0))
+    (i32.store (i32.const 524) (i32.const 62))
+    (i32.store (i32.const 528) (i32.const 3))
+    (i32.store (i32.const 532) (i32.const 0))
+    (i32.store (i32.const 536) (i32.const 66))
+    (i32.store (i32.const 540) (i32.const 5))
+    (i32.store (i32.const 544) (i32.const 1))
+    (i32.store (i32.const 548) (i32.const 72))
+    (i32.store (i32.const 552) (i32.const 9))
+    (i32.store (i32.const 556) (i32.const 2)))
 
   (func $alloc (export "alloc") (param $size i32) (result i32)
     (local $start i32) (local $end i32) (local $pages i32)
@@ -134,6 +158,53 @@
   (func $record (param $index i32) (result i32)
     (i32.add (i32.const 1024) (i32.mul (local.get $index) (i32.const 24))))
 
+  (func $primitive-record (param $index i32) (result i32)
+    (i32.add (i32.const 512) (i32.mul (local.get $index) (i32.const 12))))
+
+  ;; Local records live only while compiling one definition: name pointer,
+  ;; name length, Wasm local index, and lowered value type.
+  (func $local-record (param $index i32) (result i32)
+    (i32.add (i32.const 16384) (i32.mul (local.get $index) (i32.const 16))))
+
+  (func $token-matches-record (param $record i32) (result i32)
+    (local $i i32)
+    (if (i32.ne (i32.load offset=4 (local.get $record)) (global.get $token-len))
+      (then (return (i32.const 0))))
+    (loop $chars
+      (if (i32.lt_u (local.get $i) (global.get $token-len))
+        (then
+          (if (i32.ne
+                (i32.load8_u (i32.add (i32.load (local.get $record)) (local.get $i)))
+                (i32.load8_u (i32.add (global.get $token-ptr) (local.get $i))))
+            (then (return (i32.const 0))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $chars))))
+    (i32.const 1))
+
+  (func $find-primitive (result i32)
+    (local $i i32) (local $r i32)
+    (loop $each
+      (if (i32.lt_u (local.get $i) (i32.const 4))
+        (then
+          (local.set $r (call $primitive-record (local.get $i)))
+          (if (call $token-matches-record (local.get $r))
+            (then (return (i32.load offset=8 (local.get $r)))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $each))))
+    (i32.const -1))
+
+  (func $find-local (result i32)
+    (local $i i32) (local $r i32)
+    (loop $each
+      (if (i32.lt_u (local.get $i) (global.get $locals))
+        (then
+          (local.set $r (call $local-record (local.get $i)))
+          (if (call $token-matches-record (local.get $r))
+            (then (return (local.get $i))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $each))))
+    (i32.const -1))
+
   (func $find-def (result i32)
     (local $i i32) (local $r i32) (local $j i32)
     (block $none
@@ -190,12 +261,84 @@
       (call $emit-byte (local.get $byte))
       (br_if $more (i32.eqz (local.get $done)))))
 
+  ;; Compiler actions return (error code, expected, actual). A zero code means
+  ;; that the action emitted successfully and token processing can continue.
+  (func $compile-add (type $compiler-action) (param $offset i32)
+    (result i32 i32 i32)
+    (if (i32.lt_u (global.get $depth) (i32.const 2))
+      (then (return (i32.const 5) (i32.const 2) (global.get $depth))))
+    (global.set $depth (i32.sub (global.get $depth) (i32.const 1)))
+    (call $emit-byte (i32.const 106))
+    (global.set $body-items (i32.add (global.get $body-items) (i32.const 1)))
+    (i32.const 0) (i32.const 0) (i32.const 0))
+
+  (func $declare-local (type $compiler-action) (param $offset i32)
+    (result i32 i32 i32)
+    (local $found i32) (local $r i32) (local $definition i32)
+    (if (i32.eqz (call $next-token))
+      (then (return (i32.const 2) (i32.const 1) (i32.const 0))))
+    (local.set $found (call $find-local))
+    (if (i32.ne (local.get $found) (i32.const -1))
+      (then (return (i32.const 14) (i32.const 0) (local.get $found))))
+    ;; Primitive names are reserved; runtime definition names may be shadowed.
+    (if (i32.ne (call $find-primitive) (i32.const -1))
+      (then (return (i32.const 14) (i32.const 0) (i32.const 0))))
+    (if (i32.eqz (global.get $depth))
+      (then (return (i32.const 5) (i32.const 1) (i32.const 0))))
+    (if (i32.ge_u (global.get $locals) (i32.const 1024))
+      (then (return (i32.const 10) (i32.const 1024) (global.get $locals))))
+    (local.set $r (call $local-record (global.get $locals)))
+    (i32.store (local.get $r) (global.get $token-ptr))
+    (i32.store offset=4 (local.get $r) (global.get $token-len))
+    (local.set $definition (call $record (global.get $current)))
+    (i32.store offset=8 (local.get $r)
+      (i32.add (i32.load offset=12 (local.get $definition)) (global.get $locals)))
+    (i32.store offset=12 (local.get $r) (i32.const 127))
+    (call $emit-byte (i32.const 33))
+    (call $emit-uleb (i32.load offset=8 (local.get $r)))
+    (global.set $depth (i32.sub (global.get $depth) (i32.const 1)))
+    (global.set $locals (i32.add (global.get $locals) (i32.const 1)))
+    (global.set $body-items (i32.add (global.get $body-items) (i32.const 1)))
+    (i32.const 0) (i32.const 0) (i32.const 0))
+
+  (func $set-local (type $compiler-action) (param $offset i32)
+    (result i32 i32 i32)
+    (local $found i32) (local $r i32)
+    (if (i32.eqz (call $next-token))
+      (then (return (i32.const 2) (i32.const 1) (i32.const 0))))
+    (local.set $found (call $find-local))
+    (if (i32.eq (local.get $found) (i32.const -1))
+      (then (return (i32.const 15) (i32.const 1) (i32.const 0))))
+    (if (i32.eqz (global.get $depth))
+      (then (return (i32.const 5) (i32.const 1) (i32.const 0))))
+    (local.set $r (call $local-record (local.get $found)))
+    (call $emit-byte (i32.const 33))
+    (call $emit-uleb (i32.load offset=8 (local.get $r)))
+    (global.set $depth (i32.sub (global.get $depth) (i32.const 1)))
+    (global.set $body-items (i32.add (global.get $body-items) (i32.const 1)))
+    (i32.const 0) (i32.const 0) (i32.const 0))
+
   (func $uleb-size (param $value i32) (result i32)
     (local $size i32)
     (loop $more
       (local.set $size (i32.add (local.get $size) (i32.const 1)))
       (local.set $value (i32.shr_u (local.get $value) (i32.const 7)))
       (br_if $more (local.get $value)))
+    (local.get $size))
+
+  (func $sleb-size (param $value i32) (result i32)
+    (local $size i32) (local $byte i32) (local $done i32)
+    (loop $more
+      (local.set $byte (i32.and (local.get $value) (i32.const 127)))
+      (local.set $value (i32.shr_s (local.get $value) (i32.const 7)))
+      (local.set $size (i32.add (local.get $size) (i32.const 1)))
+      (local.set $done
+        (i32.or
+          (i32.and (i32.eqz (local.get $value))
+                   (i32.eqz (i32.and (local.get $byte) (i32.const 64))))
+          (i32.and (i32.eq (local.get $value) (i32.const -1))
+                   (i32.ne (i32.and (local.get $byte) (i32.const 64)) (i32.const 0)))))
+      (br_if $more (i32.eqz (local.get $done))))
     (local.get $size))
 
   (func $out-byte (param $byte i32)
@@ -211,6 +354,22 @@
         (then (local.set $byte (i32.or (local.get $byte) (i32.const 128)))))
       (call $out-byte (local.get $byte))
       (br_if $more (local.get $value))))
+
+  (func $out-sleb (param $value i32)
+    (local $byte i32) (local $done i32)
+    (loop $more
+      (local.set $byte (i32.and (local.get $value) (i32.const 127)))
+      (local.set $value (i32.shr_s (local.get $value) (i32.const 7)))
+      (local.set $done
+        (i32.or
+          (i32.and (i32.eqz (local.get $value))
+                   (i32.eqz (i32.and (local.get $byte) (i32.const 64))))
+          (i32.and (i32.eq (local.get $value) (i32.const -1))
+                   (i32.ne (i32.and (local.get $byte) (i32.const 64)) (i32.const 0)))))
+      (if (i32.eqz (local.get $done))
+        (then (local.set $byte (i32.or (local.get $byte) (i32.const 128)))))
+      (call $out-byte (local.get $byte))
+      (br_if $more (i32.eqz (local.get $done)))))
 
   (func $copy-out (param $from i32) (param $length i32)
     (memory.copy (global.get $out) (local.get $from) (local.get $length))
@@ -241,7 +400,7 @@
     (local $r i32) (local $i i32) (local $d i32) (local $payload i32)
     (local $type-size i32) (local $import-size i32) (local $function-size i32)
     (local $export-size i32) (local $element-size i32) (local $code-size i32)
-    (local $body-size i32) (local $capacity i32)
+    (local $body-size i32) (local $local-size i32) (local $capacity i32)
     (local.set $r (call $record (global.get $current)))
 
     ;; One type per known runtime definition keeps declaration-time type indices
@@ -271,10 +430,16 @@
                  (i32.load offset=4 (local.get $r)))))
     ;; vec(1), flags, i32.const slot/end, function vec.
     (local.set $element-size
-      (i32.add (i32.const 6) (call $uleb-size (i32.load offset=8 (local.get $r)))))
+      (i32.add (i32.const 6) (call $sleb-size (i32.load offset=8 (local.get $r)))))
+    (local.set $local-size (i32.const 1))
+    (if (global.get $locals)
+      (then
+        (local.set $local-size
+          (i32.add (i32.const 2) (call $uleb-size (global.get $locals))))))
     (local.set $body-size
-      (i32.add (i32.const 2)
-        (i32.sub (global.get $body-cursor) (global.get $body-start))))
+      (i32.add (local.get $local-size)
+        (i32.add (i32.sub (global.get $body-cursor) (global.get $body-start))
+                 (i32.const 1))))
     (local.set $code-size
       (i32.add (i32.const 1)
         (i32.add (call $uleb-size (local.get $body-size)) (local.get $body-size))))
@@ -369,17 +534,23 @@
     (call $out-byte (i32.const 9)) (call $out-uleb (local.get $element-size))
     (call $out-byte (i32.const 1)) (call $out-byte (i32.const 0))
     (call $out-byte (i32.const 65))
-    (call $out-uleb (i32.load offset=8 (local.get $r)))
+    (call $out-sleb (i32.load offset=8 (local.get $r)))
     (call $out-byte (i32.const 11))
     (call $out-byte (i32.const 1)) (call $out-byte (i32.const 0))
 
-    ;; Code: no declared locals, buffered instructions, end.
+    ;; Code: one compact i32 local group, buffered instructions, end.
     (local.set $body-size
-      (i32.add (i32.const 2)
-        (i32.sub (global.get $body-cursor) (global.get $body-start))))
+      (i32.add (local.get $local-size)
+        (i32.add (i32.sub (global.get $body-cursor) (global.get $body-start))
+                 (i32.const 1))))
     (call $out-byte (i32.const 10)) (call $out-uleb (local.get $code-size))
     (call $out-byte (i32.const 1)) (call $out-uleb (local.get $body-size))
-    (call $out-byte (i32.const 0))
+    (if (global.get $locals)
+      (then
+        (call $out-byte (i32.const 1))
+        (call $out-uleb (global.get $locals))
+        (call $out-byte (i32.const 127)))
+      (else (call $out-byte (i32.const 0))))
     (call $copy-out (global.get $body-start)
       (i32.sub (global.get $body-cursor) (global.get $body-start)))
     (call $out-byte (i32.const 11))
@@ -390,6 +561,7 @@
   (func $run (result i32 i32 i32)
     (local $r i32) (local $found i32) (local $offset i32)
     (local $classification i32) (local $number i32) (local $i i32)
+    (local $expected i32) (local $actual i32)
     (local $params i32) (local $results i32)
     (block $ready
       (loop $tokens
@@ -399,9 +571,9 @@
           (then
             (if (call $token-eq (i32.const 32) (i32.const 1))
               (then
-                (if (i32.ge_u (global.get $defs) (i32.const 256))
+                (if (i32.ge_u (global.get $defs) (i32.const 240))
                   (then (return (call $fail (i32.const 10) (local.get $offset)
-                                            (global.get $token-len) (i32.const 256)
+                                            (global.get $token-len) (i32.const 240)
                                             (global.get $defs)))))
                 (if (i32.eqz (call $next-token))
                   (then (return (call $fail (i32.const 2)
@@ -413,11 +585,17 @@
                   (then (return (call $fail (i32.const 9) (local.get $offset)
                                             (global.get $token-len) (i32.const 0)
                                             (local.get $found)))))
+                (local.set $found (call $find-primitive))
+                (if (i32.ne (local.get $found) (i32.const -1))
+                  (then (return (call $fail (i32.const 9) (local.get $offset)
+                                            (global.get $token-len) (i32.const 0)
+                                            (local.get $found)))))
                 (global.set $current (global.get $defs))
                 (local.set $r (call $record (global.get $current)))
                 (i32.store (local.get $r) (global.get $token-ptr))
                 (i32.store offset=4 (local.get $r) (global.get $token-len))
-                (i32.store offset=8 (local.get $r) (global.get $current))
+                (i32.store offset=8 (local.get $r)
+                  (i32.add (global.get $current) (i32.const 16)))
                 ;; Reserve the dictionary entry and slot before parsing the body.
                 (global.set $defs (i32.add (global.get $defs) (i32.const 1)))
                 (if (i32.eqz (call $next-token))
@@ -479,6 +657,8 @@
                 (global.set $body-cursor (global.get $body-start))
                 (global.set $depth (local.get $params))
                 (global.set $body-items (i32.const 0))
+                (global.set $locals (i32.const 0))
+                (global.set $repl-def (i32.const 0))
                 ;; Make declared parameters available on the real operand stack.
                 (local.set $i (i32.const 0))
                 (loop $param-gets
@@ -502,8 +682,39 @@
                                             (i32.sub (global.get $token-ptr) (global.get $source-base))
                                             (global.get $token-len) (i32.const 3) (i32.const 0)))))
                 (br $tokens)))
-            (return (call $fail (i32.const 4) (local.get $offset)
-                                (global.get $token-len) (i32.const 4) (i32.const 0)))))
+            ;; Any other top-level token starts an ephemeral nullary function.
+            ;; Rewind so the ordinary definition-body compiler handles it.
+            (if (i32.ge_u (global.get $defs) (i32.const 240))
+              (then (return (call $fail (i32.const 10) (local.get $offset)
+                                        (global.get $token-len) (i32.const 240)
+                                        (global.get $defs)))))
+            (global.set $current (global.get $defs))
+            (local.set $r (call $record (global.get $current)))
+            (i32.store (local.get $r) (i32.const 82))
+            (i32.store offset=4 (local.get $r) (i32.const 6))
+            (i32.store offset=8 (local.get $r)
+              (i32.add (global.get $current) (i32.const 16)))
+            (i32.store offset=12 (local.get $r) (i32.const 0))
+            (i32.store offset=16 (local.get $r) (i32.const 0))
+            (global.set $defs (i32.add (global.get $defs) (i32.const 1)))
+            (global.set $body-start
+              (call $alloc
+                (i32.add
+                  (i32.mul
+                    (i32.sub (global.get $source-end) (global.get $token-ptr))
+                    (i32.const 2))
+                  (i32.const 32))))
+            (if (i32.eqz (global.get $body-start))
+              (then (return (call $fail (i32.const 11) (local.get $offset)
+                                        (i32.const 0) (i32.const 0) (i32.const 0)))))
+            (global.set $body-cursor (global.get $body-start))
+            (global.set $depth (i32.const 0))
+            (global.set $body-items (i32.const 0))
+            (global.set $locals (i32.const 0))
+            (global.set $repl-def (i32.const 1))
+            (global.set $in-def (i32.const 1))
+            (global.set $scan (global.get $token-ptr))
+            (br $tokens)))
 
         ;; Definition body.
         (if (call $token-eq (i32.const 32) (i32.const 1))
@@ -523,14 +734,31 @@
             (i32.store offset=20 (local.get $r) (i32.const 1))
             (global.set $in-def (i32.const 0))
             (return (call $finish-module))))
-        (if (call $token-eq (i32.const 43) (i32.const 7))
+        (local.set $found (call $find-primitive))
+        (if (i32.ne (local.get $found) (i32.const -1))
           (then
-            (if (i32.lt_u (global.get $depth) (i32.const 2))
-              (then (return (call $fail (i32.const 5) (local.get $offset)
-                                        (global.get $token-len) (i32.const 2)
+            (local.get $offset)
+            (local.get $found)
+            (call_indirect (type $compiler-action))
+            (local.set $actual)
+            (local.set $expected)
+            (local.set $classification)
+            (if (local.get $classification)
+              (then (return (call $fail (local.get $classification) (local.get $offset)
+                                        (global.get $token-len) (local.get $expected)
+                                        (local.get $actual)))))
+            (br $tokens)))
+        (local.set $found (call $find-local))
+        (if (i32.ne (local.get $found) (i32.const -1))
+          (then
+            (local.set $r (call $local-record (local.get $found)))
+            (if (i32.ge_u (global.get $depth) (i32.const 1024))
+              (then (return (call $fail (i32.const 10) (local.get $offset)
+                                        (global.get $token-len) (i32.const 1024)
                                         (global.get $depth)))))
-            (global.set $depth (i32.sub (global.get $depth) (i32.const 1)))
-            (call $emit-byte (i32.const 106))
+            (call $emit-byte (i32.const 32))
+            (call $emit-uleb (i32.load offset=8 (local.get $r)))
+            (global.set $depth (i32.add (global.get $depth) (i32.const 1)))
             (global.set $body-items (i32.add (global.get $body-items) (i32.const 1)))
             (br $tokens)))
         (call $parse-int)
@@ -574,7 +802,7 @@
                 (call $emit-byte (i32.const 0)))
               (else
                 (call $emit-byte (i32.const 65))
-                (call $emit-uleb (i32.load offset=8 (local.get $r)))
+                (call $emit-sleb (i32.load offset=8 (local.get $r)))
                 (call $emit-byte (i32.const 17))
                 (call $emit-uleb (local.get $found))
                 (call $emit-byte (i32.const 0))))
@@ -583,9 +811,30 @@
         (return (call $fail (i32.const 4) (local.get $offset)
                             (global.get $token-len) (i32.const 4) (i32.const 0)))))
     (if (global.get $in-def)
-      (then (return (call $fail (i32.const 2)
-                                (i32.sub (global.get $source-end) (global.get $source-base))
-                                (i32.const 0) (i32.const 2) (i32.const 0)))))
+      (then
+        (if (global.get $repl-def)
+          (then
+            (local.set $r (call $record (global.get $current)))
+            (if (i32.eqz (global.get $body-items))
+              (then (return (call $fail (i32.const 6)
+                                        (i32.sub (global.get $source-end) (global.get $source-base))
+                                        (i32.const 0) (i32.const 1) (i32.const 0)))))
+            (i32.store offset=16 (local.get $r) (global.get $depth))
+            (i32.store offset=20 (local.get $r) (i32.const 1))
+            (global.set $in-def (i32.const 0))
+            (global.set $pending-run (i32.const 1))
+            (return (call $finish-module))))
+        (return (call $fail (i32.const 2)
+                           (i32.sub (global.get $source-end) (global.get $source-base))
+                           (i32.const 0) (i32.const 2) (i32.const 0)))))
+    (if (global.get $pending-run)
+      (then
+        (global.set $pending-run (i32.const 0))
+        (global.set $defs (global.get $current))
+        (return
+          (i32.const 2)
+          (i32.add (global.get $current) (i32.const 16))
+          (global.get $depth))))
     (i32.const 0) (i32.const 0) (i32.const 0))
 
   (func $compile (export "compile") (param $source i32) (param $length i32)
@@ -608,4 +857,8 @@
 
   (func (export "resume") (result i32 i32 i32)
     (call $run))
+
+  ;; Compiler actions and generated runtime functions intentionally share one
+  ;; heterogeneous table. Runtime definitions start at slot 16.
+  (elem (i32.const 0) $compile-add $declare-local $set-local)
 )
