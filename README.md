@@ -22,16 +22,21 @@ Parameters and results are explicit, with arbitrary i32 counts:
 ```
 
 `i32.add` and its `add` alias are dictionary-backed compiler actions. Named
-locals are compile-time words scoped to the current definition. `local name`
-consumes the top value into a new Wasm local, the bare name emits `local.get`,
-and `local.set name` consumes a value to update it:
+locals are compile-time words scoped to the current definition. `local name
+i32` declares a zero-initialized Wasm local. `@name` emits `local.get`, `!name`
+consumes a value and emits `local.set`, and `!@name` emits `local.tee`, storing
+the top value while retaining it on the operand stack:
 
 ```forth
 : twice ( i32 -- i32 )
-  local x
-  x x add
+  local x i32
+  !x
+  @x @x add
 ;
 ```
+
+The bare local name is intentionally invalid so a missing operation prefix is
+reported instead of silently reading or modifying a local.
 
 Each completed definition produces one extension module immediately. The
 extension imports `memory` and `table` from `wasm-forth`, installs its runtime
@@ -115,8 +120,8 @@ Current error codes are: `2` unexpected end/token, `3` nested definition, `4`
 unknown name, `5` type-stack underflow, `6` empty definition, `7` unknown
 export, `8` integer overflow, `9` duplicate definition, `10` compiler limit,
 `11` invalid input/allocation failure, `12` unsupported/invalid signature type,
-`13` final signature mismatch, `14` duplicate/reserved local name, and `15`
-unknown local name.
+`13` final signature mismatch, `14` duplicate/reserved local name, `15` unknown
+local name, and `16` missing local operation prefix.
 
 The bootstrap currently reserves table slots 0-15 for compiler actions and
 limits runtime definitions to 240, the semantic type stack and local context to

@@ -95,13 +95,17 @@ async function compileIncrement(text) {
 {
   const result = await compileSource(
     ": sum ( i32 i32 -- i32 ) add ; " +
-    ": twice ( i32 -- i32 ) local x x x add ; " +
-    ": replace ( i32 i32 -- i32 ) local replacement local value replacement local.set value value ;",
+    ": twice ( i32 -- i32 ) local x i32 !x @x @x add ; " +
+    ": replace ( i32 i32 -- i32 ) local replacement i32 local value i32 !replacement !value @replacement !value @value ; " +
+    ": zero-local ( -- i32 ) local x i32 @x ; " +
+    ": tee-local ( i32 -- i32 i32 ) local x i32 !@x @x ;",
   );
   assert.equal(result.status, 0);
   assert.equal(result.instances[0].exports.sum(20, 22), 42);
   assert.equal(result.instances[1].exports.twice(21), 42);
   assert.equal(result.instances[2].exports.replace(10, 42), 42);
+  assert.equal(result.instances[3].exports["zero-local"](), 0);
+  assert.deepEqual(result.instances[4].exports["tee-local"](42), [42, 42]);
   assert.equal(typeof table.get(0), "function", "generated modules must not overwrite compiler actions");
   assert.equal(typeof table.get(16), "function", "runtime definitions start after reserved action slots");
 }
@@ -151,11 +155,13 @@ const failures = [
   ["export missing", 7],
   [": unfinished ( -- i32 ) 1", 2],
   [": bad ( f32 -- i32 ) 1 ;", 12],
-  [": bad ( -- i32 ) local x ;", 5],
-  [": bad ( i32 -- i32 ) local x 1 local x x ;", 14],
-  [": bad ( i32 -- i32 ) local.set missing 1 ;", 15],
+  [": bad ( -- i32 ) local x i32 !x @x ;", 5],
+  [": bad ( i32 -- i32 ) local x i32 local x i32 @x ;", 14],
+  [": bad ( i32 -- i32 ) !missing ;", 15],
+  [": bad ( i32 -- i32 ) @missing ;", 15],
+  [": bad ( i32 -- i32 ) local x i32 x ;", 16],
   [": add ( i32 i32 -- i32 ) i32.add ;", 9],
-  [": first ( i32 -- i32 ) local x x ; : second ( -- i32 ) x ;", 4],
+  [": first ( i32 -- i32 ) local x i32 !x @x ; : second ( -- i32 ) @x ;", 15],
 ];
 
 for (const [source, code] of failures) {
