@@ -18,7 +18,11 @@ The first compiler is written directly in WebAssembly. Its checked-in source is 
 
 Do not implement the core compiler in C, Rust, or another language whose toolchain introduces an ABI, shadow stack, `__stack_pointer`, runtime support functions, or other conventions not required by this project. The bootstrap module uses ordinary Wasm functions, parameters, locals, globals, tables, and linear memory deliberately and visibly.
 
-The core compiler module has no imports. It defines and exports its own linear memory and grows it as needed. It must not depend on files, environment variables, a clock, threads, stdout, WASI, or a host allocator. Native command-line tools and browser glue are thin adapters around the same Wasm module.
+The core compiler has one import, the synchronous module installer described
+below. It defines and exports its own linear memory and grows it as needed. It
+must not depend on files, environment variables, a clock, threads, stdout,
+WASI, or a host allocator. Native command-line tools and browser glue are thin
+adapters around the same Wasm module.
 
 The compiler has these concrete components:
 
@@ -51,11 +55,10 @@ Compiler state is represented explicitly in the bootstrap module's linear memory
 ### Dynamic module lifecycle
 
 The compiler is a persistent compile/run environment; there is no final program
-module. It owns and exports the linear memory and a heterogeneous `funcref`
-table. Generated modules import those objects, and active element segments add
-their runtime functions to compiler-assigned table slots. A thin host adapter
-only services an instantiate-and-resume protocol when compilation yields a new
-module.
+module. It owns and exports linear memory and a heterogeneous `funcref` table.
+Generated modules import those objects where needed. A thin host adapter exposes
+the synchronous `wasm-forth:host.install` function and maintains a named linker
+registry rooted at `wasm-forth:user/` when compilation yields a new module.
 
 Initially, each completed definition is emitted as one module and instantiated
 before compilation continues. This makes newly generated immediates callable
@@ -63,16 +66,19 @@ immediately and gives failures a small transactional boundary. Multi-function
 module batching is a later optional optimization, not part of the initial
 linking semantics.
 
-Runtime words may have arbitrary explicit Wasm signatures. The shared table is
-heterogeneous, and generated cross-module calls use `call_indirect` with the
-specific expected signature. Compiler-callable immediates use a separate,
-canonical compiler ABI because the persistent compiler must know how to invoke
-them.
+Runtime words may have arbitrary explicit Wasm signatures. Each definition is
+exported under its source name and later modules import it by that name from
+`wasm-forth:user/<name>`. Generated cross-module calls are ordinary typed direct calls.
+The adapter's registry may associate signatures and other metadata with each
+runtime extern, but the compiler retains the semantic metadata it needs while
+compiling. Compiler-callable immediates use the shared heterogeneous table and a
+canonical compiler ABI because the persistent compiler must invoke them
+dynamically.
 
 Every dictionary word names a compiler action invoked indirectly. The compiler
 action for an ordinary runtime function reads that function's explicit
-signature and table slot from dictionary metadata, checks the semantic type
-stack, and emits its typed indirect call. It is a shared compiler action; do
+signature and linker name from dictionary metadata, checks the semantic type
+stack, and emits its typed named import and direct call. It is a shared compiler action; do
 not generate one compiler function for every ordinary runtime definition.
 
 Dictionary words are not limited to functions. Constants, variables, globals,
@@ -89,9 +95,10 @@ may additionally be represented by exported immutable globals and dictionary
 metadata so later modules can emit their address and length with the correct
 semantic types.
 
-Function signatures are explicit. Assign function indices and table slots at
-declaration time so self-recursion works, and permit declarations to reserve
-the signatures and slots needed for mutual recursion.
+Function signatures are explicit. Assign type and function indices at
+declaration time so self-recursion works. Mutually recursive definitions must
+be emitted together or use an explicit declaration/linking mechanism; do not
+silently fall back to an untyped host call.
 
 The initial embedding ABI is intentionally Wasm-native:
 
@@ -101,14 +108,14 @@ export reset() -> ()
 export alloc(byte_count: i32) -> pointer: i32
 export compile(source: i32, source_length: i32)
     -> (status: i32, payload: i32, payload_length: i32)
-export resume()
-    -> (status: i32, payload: i32, payload_length: i32)
+import wasm-forth:host.install(module: i32, module_length: i32)
+    -> status: i32
 ```
 
 The host calls `reset`, allocates and writes the source bytes, then calls
-`compile`. A ready status means the source was consumed. An install status means
-the payload is a generated extension module; the host instantiates it with the
-compiler's exported memory and table and calls `resume`. On failure, the
+`compile`. Whenever a definition is complete, the compiler synchronously calls
+the imported installer with the generated extension module. The host copies,
+instantiates, and registers that module before returning success. On failure, the
 payload is a compiler-authored UTF-8 diagnostic containing the actual failing
 source span when one exists. Error codes and byte locations remain internal
 compiler state rather than part of the embedding contract. Returned pointers remain valid until
@@ -117,15 +124,30 @@ as an allocation-failure sentinel. This is not a C ABI: there is no implicit
 stack pointer, stack frame layout, allocator contract, or null-terminated
 string convention.
 
+The compile status is `0` for success or `1` for a structured error. Module
+installation and top-level execution are synchronous callbacks, not additional
+compiler statuses.
+
 An interactive top-level expression is emitted as an ephemeral nullary
-extension function. After its install/resume cycle, a run status returns that
-function's table slot and result count so the host can invoke it and present the
-result. Its dictionary record is then discarded and its slot may be reused.
-This status is necessary because the import-free compiler cannot instantiate or
-invoke the extension itself, while the REPL must not emulate the Wasm operand
-stack in host code.
+extension function exported as `__repl`. The synchronous installer invokes that
+target function and presents its results rather than registering it as a
+persistent word. Its dictionary record is then discarded. The REPL never
+emulates the Wasm operand stack in host code.
 
 This architecture is the default. Change it only in response to a concrete limitation demonstrated by an implementation or test, and record the reason here.
+
+Named direct imports replaced ordinary runtime table slots because the slot
+scheme duplicated the compiler's name dictionary with a second numeric runtime
+namespace. Every supported host already needs an import resolver, so one named
+registry is both portable and able to represent functions, globals, and future
+extern kinds. The table remains exclusively for compiler actions.
+
+Each definition uses a distinct `wasm-forth:user/<name>` module namespace rather
+than placing every function in one physical Wasm module. WAMR's typed
+multi-module loader resolves dependencies by module name and cannot merge
+exports from independent modules into one synthetic Wasm module. Per-definition
+names preserve direct typed Wasm-to-Wasm calls without native signature
+trampolines; adapters still present the collection as one logical registry.
 
 ### Initial vertical slice
 
@@ -134,7 +156,7 @@ Implement one end-to-end path before broad feature work:
 1. Tokenize names, integer literals, `:`, `;`, and `export`.
 2. Compile `i32.const`, `i32.add`, calls, and one exported nullary function returning `i32`.
 3. Maintain and test the type stack while instructions are emitted.
-4. Return module bytes through the exported Wasm ABI and instantiate them in at least one native runtime and one browser.
+4. Pass module bytes through the imported installer ABI and instantiate them in at least one native runtime and one browser.
 5. Add `drop`, `dup`, and `swap`, including helper specialization and invalid-stack tests.
 6. Add structured control flow before adding linear memory, GC, SIMD, or C ABI features.
 
@@ -147,7 +169,7 @@ export answer
 
 In this slice, a bare integer literal emits `i32.const`; definitions use
 explicit signatures; and a name referring to a linked target definition emits
-a typed indirect call. Reject integer overflow, unknown names, nested
+a typed direct call. Reject integer overflow, unknown names, nested
 definitions, an empty `;`, and signature/type-stack mismatches as structured
 compile errors rather than guessing.
 
@@ -448,7 +470,6 @@ Important targets:
 
 ```text
 iwasm / WAMR
-wasmi
 Wasmtime
 Chromium WebAssembly
 Firefox WebAssembly

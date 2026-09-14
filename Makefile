@@ -2,7 +2,7 @@ WAT2WASM ?= wat2wasm
 WEB_PORT ?= 8000
 BROWSER ?= chromium
 
-.PHONY: all test test-node test-runtimes test-wasmi test-wasmtime test-browser test-browser-all repl-wasmi repl-wasmtime web clean
+.PHONY: all test test-node test-runtimes test-wamr test-wasmtime test-browser test-browser-all repl-wamr repl-wasmtime web clean
 
 all: build/compiler.wasm
 
@@ -15,18 +15,21 @@ test: test-runtimes test-browser-all
 test-node: build/compiler.wasm
 	node test/compiler.test.mjs
 
-test-runtimes: test-node test-wasmi test-wasmtime
+test-runtimes: test-node test-wamr test-wasmtime
 
-test-wasmi: build/compiler.wasm
-	cargo build --locked --manifest-path test/runtimes/Cargo.toml --features wasmi --bin wasmi-repl
-	node test/native-repl.test.mjs test/runtimes/target/debug/wasmi-repl wasmi
+test/runtimes/wamr/build/wamr-repl: test/runtimes/wamr/main.c test/runtimes/wamr/CMakeLists.txt
+	cmake -S test/runtimes/wamr -B test/runtimes/wamr/build $(if $(WAMR_ROOT_DIR),-DWAMR_ROOT_DIR=$(WAMR_ROOT_DIR))
+	cmake --build test/runtimes/wamr/build --parallel
+
+test-wamr: build/compiler.wasm test/runtimes/wamr/build/wamr-repl
+	node test/native-repl.test.mjs test/runtimes/wamr/build/wamr-repl wamr
 
 test-wasmtime: build/compiler.wasm
 	cargo build --locked --manifest-path test/runtimes/Cargo.toml --features wasmtime --bin wasmtime-repl
 	node test/native-repl.test.mjs test/runtimes/target/debug/wasmtime-repl wasmtime
 
-repl-wasmi: build/compiler.wasm
-	cargo run --locked --manifest-path test/runtimes/Cargo.toml --features wasmi --bin wasmi-repl
+repl-wamr: build/compiler.wasm test/runtimes/wamr/build/wamr-repl
+	test/runtimes/wamr/build/wamr-repl
 
 repl-wasmtime: build/compiler.wasm
 	cargo run --locked --manifest-path test/runtimes/Cargo.toml --features wasmtime --bin wasmtime-repl
@@ -52,4 +55,4 @@ web: build/compiler.wasm
 	  wait "$$server"
 
 clean:
-	rm -rf build
+	rm -rf build test/runtimes/wamr/build

@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [node, wasmi, wasmtime]
+        runtime: [node, wamr, wasmtime]
     steps:
       - uses: actions/checkout@v4
       - name: Install WABT
@@ -24,9 +24,9 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.runtime != 'node'
+        if: matrix.runtime == 'wasmtime'
       - uses: Swatinem/rust-cache@v2
-        if: matrix.runtime != 'node'
+        if: matrix.runtime == 'wasmtime'
         with:
           workspaces: test/runtimes
       - name: Test ${{ matrix.runtime }}

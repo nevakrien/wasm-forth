@@ -3,15 +3,22 @@ import { readFile } from "node:fs/promises";
 import { ReplSession } from "../browser/repl.mjs";
 
 const compilerBytes = await readFile(new URL("../build/compiler.wasm", import.meta.url));
-const { instance: compiler } = await WebAssembly.instantiate(compilerBytes);
+const repl = await ReplSession.instantiate(compilerBytes);
+const { compiler } = repl;
 const { table } = compiler.exports;
-const repl = new ReplSession(compiler);
 const replSource = await readFile(new URL("./fixtures/repl.txt", import.meta.url), "utf8");
 const replExpected = JSON.parse(
   await readFile(new URL("./fixtures/repl.expected.json", import.meta.url), "utf8"),
 );
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
+
+assert.deepEqual(
+  WebAssembly.Module.imports(new WebAssembly.Module(compilerBytes))
+    .map(({ module, name }) => [module, name]),
+  [["wasm-forth:host", "install"]],
+);
+assert.equal("resume" in compiler.exports, false);
 
 function decodeError(bytes) {
   return decoder.decode(bytes);
@@ -61,6 +68,12 @@ async function compileIncrement(text) {
   assert.equal(result.modules.length, 2, "one module must be emitted per semicolon");
   assert.equal(result.instances[0].exports.forty(), 40);
   assert.equal(result.instances[1].exports.answer(), 42);
+  assert.deepEqual(
+    WebAssembly.Module.imports(new WebAssembly.Module(result.modules[1]))
+      .filter(({ kind }) => kind === "function")
+      .map(({ module, name }) => [module, name]),
+    [["wasm-forth:user/forty", "forty"]],
+  );
 }
 
 {
@@ -87,7 +100,7 @@ async function compileIncrement(text) {
   assert.equal(result.instances[3].exports["zero-local"](), 0);
   assert.deepEqual(result.instances[4].exports["tee-local"](42), [42, 42]);
   assert.equal(typeof table.get(0), "function", "generated modules must not overwrite compiler actions");
-  assert.equal(typeof table.get(16), "function", "runtime definitions start after reserved action slots");
+  assert.equal(table.get(16), null, "ordinary definitions must link by name, not table slot");
 }
 
 {
@@ -98,18 +111,17 @@ async function compileIncrement(text) {
 
 {
   const result = await compileSource("1 2 add");
-  assert.equal(result.status, 2);
-  assert.equal(result.length, 1);
+  assert.equal(result.status, 0);
   assert.equal(result.execution.value, 3);
-  assert.equal(table.get(result.payload)(), 3);
+  assert.equal(result.instances[0].exports.__repl(), 3);
 }
 
 {
   const result = await compileSource(": sum ( i32 i32 -- i32 ) add ; 20 22 sum");
-  assert.equal(result.status, 2);
+  assert.equal(result.status, 0);
   assert.equal(result.instances.length, 2);
   assert.equal(result.execution.value, 42);
-  assert.equal(table.get(result.payload)(), 42);
+  assert.equal(result.instances[1].exports.__repl(), 42);
 }
 
 {
@@ -122,13 +134,13 @@ async function compileIncrement(text) {
     if (expected.status === "READY") {
       assert.equal(result.status, 0, source);
     } else if (expected.status === "RUN") {
-      assert.equal(result.status, 2, source);
+      assert.equal(result.status, 0, source);
       const values = Array.isArray(result.execution.value)
         ? result.execution.value
         : [result.execution.value];
       assert.deepEqual(values, expected.values, source);
     } else {
-      assert.equal(result.status, 3, source);
+      assert.equal(result.status, 1, source);
       assert.equal(decodeError(result.bytes), expected.message, source);
     }
   }
@@ -165,7 +177,7 @@ const encoder = new TextEncoder();
 
 for (const [source, message, expectedToken] of failures) {
   const result = await compileSource(source);
-  assert.equal(result.status, 3, source);
+  assert.equal(result.status, 1, source);
   assert.equal(decodeError(result.bytes), message, source);
   if (expectedToken) {
     const sourceBytes = encoder.encode(source);
@@ -186,7 +198,7 @@ for (const [source, message, expectedToken] of failures) {
 
   const failed = await compileIncrement(": retry ( -- i32 ) missing ;");
   const retried = await compileIncrement(": retry ( -- i32 ) answer ;");
-  assert.equal(failed.status, 3);
+  assert.equal(failed.status, 1);
   assert.equal(decodeError(failed.bytes), "unknown name: `missing`");
   assert.equal(retried.status, 0, "a failed incremental definition must be rolled back");
   assert.equal(retried.instances[0].exports.retry(), 42);

@@ -1,9 +1,9 @@
 # wasm-forth
 
 A Forth-like environment for programming WebAssembly directly. The bootstrap
-compiler is an import-free WebAssembly module which owns its memory and
-heterogeneous `funcref` table. It emits Wasm binary directly, without a runtime
-WAT assembler or hidden data stack.
+compiler owns its memory and heterogeneous `funcref` table and imports one thin
+host module installer. It emits Wasm binary directly, without a runtime WAT
+assembler or hidden data stack.
 
 The current vertical slice accepts explicitly typed i32 definitions, signed
 i32 literals, `i32.add`, typed calls to earlier definitions, and direct
@@ -39,10 +39,12 @@ The bare local name is intentionally invalid so a missing operation prefix is
 reported instead of silently reading or modifying a local.
 
 Each completed definition produces one extension module immediately. The
-extension imports `memory` and `table` from `wasm-forth`, installs its runtime
-function in a compiler-assigned table slot with an active element segment, and
-exports the function under its source name. Calls across modules use typed
-`call_indirect` against the shared heterogeneous table.
+extension exports its function under its source name. Later modules import
+earlier functions by name from `wasm-forth:user/<name>`, and calls across modules are
+ordinary typed direct calls. Adapters implement that namespace with a JavaScript
+object or an equivalent native runtime registry. The shared table is reserved
+for compiler actions. Top-level expressions are ordinary target functions
+exported under the reserved name `__repl`.
 
 ## Build and test
 
@@ -52,24 +54,24 @@ WABT's `wat2wasm` and Node.js are the core development dependencies.
 make test
 ```
 
-This assembles `compiler/compiler.wat`, drives the instantiate-and-resume
-protocol on Node, wasmi, Wasmtime, Chromium, and Firefox, validates and
+This assembles `compiler/compiler.wat`, drives synchronous module installation
+on Node, WAMR, Wasmtime, Chromium, and Firefox, validates and
 instantiates every generated extension, and checks execution and structured
 failures. Rust, the npm development dependencies, and Playwright's Chromium and
 Firefox installations are required for the complete default suite.
 
-The native-only subset tests Node, wasmi, and Wasmtime:
+The native-only subset tests Node, WAMR, and Wasmtime:
 
 ```sh
 make test-runtimes
 ```
 
-Individual engines can be selected with `make test-node`, `make test-wasmi`,
+Individual engines can be selected with `make test-node`, `make test-wamr`,
 or `make test-wasmtime`. The native cases execute a typed cross-module call,
 single- and multi-result top-level expressions, and a structured compilation
 failure. The cross-module case submits two definitions and the expression that
 calls them as three separate chunks in one persistent compiler session, then
-invokes the slot returned by `RUN`. CI runs all three engines.
+invokes the generated `__repl` export. CI runs all three engines.
 
 All five runtimes consume the same line-delimited conformance source at
 `test/fixtures/repl.txt`; expected outcomes live beside it in
@@ -80,12 +82,16 @@ The native adapters can also be used as line-oriented development REPLs. Each
 non-empty input line is submitted as one persistent source chunk:
 
 ```sh
-make repl-wasmi
+make repl-wamr
 make repl-wasmtime
 ```
 
+The WAMR target builds the pinned WAMR 2.4.5 interpreter through CMake. Set
+`WAMR_ROOT_DIR=/path/to/wasm-micro-runtime` to use an existing checkout;
+otherwise CMake fetches it.
+
 The browser workspace and Node tests share `browser/repl.mjs`, which implements
-the source-chunk, `INSTALL`, instantiate, `resume`, and `RUN` lifecycle. The
+the host installer and the `OK`/`ERROR` lifecycle. The
 browser test drives that workspace through the same three-chunk REPL flow
 headlessly on Chromium and Firefox in CI.
 After installing the development dependencies and browsers with `npm ci` and
@@ -107,9 +113,8 @@ The server runs until Ctrl+C. Set a different port with, for example,
 the URL printed by the command. The workspace is a persistent session: submit
 one definition, submit later definitions that call it, and invoke a word by
 entering its i32 arguments followed by its name, such as `20 22 sum`. Definitions
-remain installed until Reset Session is pressed. It uses the same
-instantiate-and-resume protocol as the Node tests and has no server-side runtime
-component.
+remain installed until Reset Session is pressed. It uses the same synchronous
+installer protocol as the Node tests and has no server-side runtime component.
 
 ## Embedding ABI
 
@@ -117,32 +122,31 @@ See [INTEGRATION.md](INTEGRATION.md) for the complete adapter state machine,
 object ownership rules, a persistent REPL example, and JavaScript and native
 runtime integration notes.
 
-The compiler exports `memory`, `table`, `reset`, `alloc`, `compile`, and
-`resume`. `compile(source, source_length)` and `resume()` return
-`(status, payload, payload_length)`:
+The compiler imports `wasm-forth:host.install(module_pointer, module_length) ->
+status` and exports `memory`, `table`, `reset`, `alloc`, and `compile`.
+`compile(source, source_length)` returns `(status, payload, payload_length)`:
 
 | Status | Meaning |
 | ---: | --- |
-| `0` | `READY`: source consumed; payload and length are zero |
-| `1` | `INSTALL`: payload is one extension module |
-| `2` | `RUN`: payload is an ephemeral function's table slot; length is its result count |
-| `3` | `ERROR`: payload is a compiler-authored UTF-8 diagnostic |
+| `0` | `OK`: source consumed; payload and length are zero |
+| `1` | `ERROR`: payload is a compiler-authored UTF-8 diagnostic |
 
-On `INSTALL`, instantiate the bytes with the compiler-owned objects and then
-call `resume`:
+The imported installer synchronously copies and instantiates each generated
+module, resolving prior definitions from the `wasm-forth:user/` namespace:
 
 ```js
-const { instance } = await WebAssembly.instantiate(bytes, {
-  "wasm-forth": { memory: compiler.memory, table: compiler.table },
-});
-response = compiler.resume();
+const instance = new WebAssembly.Instance(module, userDefinitions);
+userDefinitions[`wasm-forth:user/${name}`] = {
+  [name]: instance.exports[name],
+};
+return 0;
 ```
 
 Top-level expressions use the same compiler and Wasm operand stack as function
 bodies. For example, `1 2 add` emits and installs an ephemeral nullary function.
-After installation, `resume` returns `RUN`; the host calls
-`table.get(payload)()` and presents its result. The ephemeral dictionary record
-is removed immediately, and its table slot is reused by the next expression.
+During installation the adapter recognizes `__repl`, invokes it, and presents
+its results instead of registering it as a persistent word. The ephemeral
+dictionary record is removed immediately.
 
 The compiler stops scanning exactly after each `;`, so no later source is
 processed until the host has installed that definition. There is no final
@@ -153,8 +157,8 @@ from numeric codes by each adapter. When a source token caused the failure, the
 diagnostic contains that exact source span, for example
 `unknown name: \`missing\``. Adapters can render the payload directly.
 
-The bootstrap currently reserves table slots 0-15 for compiler actions and
-limits runtime definitions to 240, the semantic type stack and local context to
-1024 entries each, and source to 1 MiB. Runtime definition calls still need to
-move onto the shared compiler-action path described in `TODO.md`; dictionary
-entries are not architecturally restricted to runtime functions.
+The bootstrap table is compiler-only. The current implementation limits definitions to 240,
+the semantic type stack and local context to 1024 entries each, and source to 1
+MiB. Runtime definition calls still need to move onto the shared compiler-action
+path described in `TODO.md`; dictionary entries are not architecturally
+restricted to runtime functions.

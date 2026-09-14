@@ -2,4 +2,6 @@
 : answer ( -- i32 ) forty 2 i32.add ;
 answer
 1 2
+: pair ( i32 i32 -- i32 i32 ) 0 i32.add ;
+4 5 pair
 : bad ( -- i32 ) missing ;

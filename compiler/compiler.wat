@@ -1,5 +1,6 @@
 (module
   (type $compiler-action (func (param i32) (result i32 i32 i32)))
+  (import "wasm-forth:host" "install" (func $host-install (param i32 i32) (result i32)))
   ;; Page zero is compiler state. Host/source/output allocations start at page 1.
   (memory (export "memory") 2)
   (table (export "table") 256 funcref)
@@ -20,10 +21,9 @@
   (global $locals (mut i32) (i32.const 0))
   (global $action-data (mut i32) (i32.const 0))
   (global $repl-def (mut i32) (i32.const 0))
-  (global $pending-run (mut i32) (i32.const 0))
   (global $out (mut i32) (i32.const 0))
 
-  ;; Definition record (24 bytes): name pointer, name length, table slot,
+  ;; Definition record (24 bytes): name pointer, name length, reserved metadata,
   ;; i32 parameter count, i32 result count, complete flag.
   (data (i32.const 32) ":")
   (data (i32.const 34) ";")
@@ -36,6 +36,7 @@
   (data (i32.const 62) "add")
   (data (i32.const 66) "local")
   (data (i32.const 82) "__repl")
+  (data (i32.const 88) "wasm-forth:user")
 
   ;; Compiler-authored diagnostics use fixed-width slots below temporary memory.
   (data (i32.const 32896) "unexpected token or end of input")
@@ -65,7 +66,6 @@
     (global.set $depth (i32.const 0))
     (global.set $locals (i32.const 0))
     (global.set $repl-def (i32.const 0))
-    (global.set $pending-run (i32.const 0))
     ;; Primitive dictionary record: name pointer, name length, action table slot.
     (i32.store (i32.const 512) (i32.const 43))
     (i32.store (i32.const 516) (i32.const 7))
@@ -524,21 +524,22 @@
           (i32.add (global.get $source-base) (local.get $offset))
           (local.get $span))
         (call $out-byte (i32.const 96))))
-    (i32.const 3)
+    (i32.const 1)
     (local.get $payload)
     (i32.sub (global.get $out) (local.get $payload)))
 
-  ;; Emit the current definition as an extension importing the persistent
-  ;; compiler memory/table and installing its function into its reserved slot.
+  ;; Emit and synchronously install the current definition. Earlier definitions
+  ;; are ordinary named function imports. Ephemeral expressions are exported as
+  ;; __repl and invoked through the same target-function ABI as named words.
   (func $finish-module (result i32 i32 i32)
     (local $r i32) (local $i i32) (local $d i32) (local $payload i32)
     (local $type-size i32) (local $import-size i32) (local $function-size i32)
-    (local $export-size i32) (local $element-size i32) (local $code-size i32)
+    (local $export-size i32) (local $code-size i32)
     (local $body-size i32) (local $local-size i32) (local $capacity i32)
     (local.set $r (call $record (global.get $current)))
 
     ;; One type per known runtime definition keeps declaration-time type indices
-    ;; stable for typed call_indirect, including self-calls.
+    ;; stable for named imports and direct calls, including self-calls.
     (local.set $type-size (call $uleb-size (global.get $defs)))
     (loop $size-types
       (if (i32.lt_u (local.get $i) (global.get $defs))
@@ -554,17 +555,35 @@
                            (i32.load offset=16 (local.get $d)))))))
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $size-types))))
-    ;; vec(2), module/name strings and import descriptors.
-    (local.set $import-size (i32.const 44))
+    ;; Function import index and dictionary index are the same, while the
+    ;; current definition's function index is $current.
+    (local.set $import-size (call $uleb-size (global.get $current)))
+    (local.set $i (i32.const 0))
+    (loop $size-imports
+      (if (i32.lt_u (local.get $i) (global.get $current))
+        (then
+          (local.set $d (call $record (local.get $i)))
+          (local.set $import-size
+            (i32.add (local.get $import-size)
+              (i32.add (i32.const 17)
+                (i32.add
+                  (i32.add
+                    (i32.add
+                      (call $uleb-size
+                        (i32.add (i32.load offset=4 (local.get $d)) (i32.const 16)))
+                      (i32.mul (i32.load offset=4 (local.get $d)) (i32.const 2)))
+                    (call $uleb-size (i32.load offset=4 (local.get $d))))
+                  (call $uleb-size (local.get $i))))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $size-imports))))
     (local.set $function-size
       (i32.add (i32.const 1) (call $uleb-size (global.get $current))))
     (local.set $export-size
-      (i32.add (i32.const 3)
-        (i32.add (call $uleb-size (i32.load offset=4 (local.get $r)))
-                 (i32.load offset=4 (local.get $r)))))
-    ;; vec(1), flags, i32.const slot/end, function vec.
-    (local.set $element-size
-      (i32.add (i32.const 6) (call $sleb-size (i32.load offset=8 (local.get $r)))))
+      (i32.add (i32.const 2)
+        (i32.add
+          (i32.add (call $uleb-size (i32.load offset=4 (local.get $r)))
+                   (i32.load offset=4 (local.get $r)))
+          (call $uleb-size (global.get $current)))))
     (local.set $local-size (i32.const 1))
     (if (global.get $locals)
       (then
@@ -585,11 +604,9 @@
             (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $import-size)) (local.get $import-size)))
             (i32.add
               (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $function-size)) (local.get $function-size)))
-              (i32.add
-                (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $export-size)) (local.get $export-size)))
-                (i32.add
-                  (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $element-size)) (local.get $element-size)))
-                  (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $code-size)) (local.get $code-size))))))))))
+               (i32.add
+                 (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $export-size)) (local.get $export-size)))
+                 (i32.add (i32.const 1) (i32.add (call $uleb-size (local.get $code-size)) (local.get $code-size)))))))))
     (local.set $payload (call $alloc (local.get $capacity)))
     (if (i32.eqz (local.get $payload))
       (then (return (call $fail (i32.const 11) (i32.const 0) (i32.const 0)
@@ -626,51 +643,34 @@
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br $write-types))))
 
-    ;; Imports: (memory 2) and (table 256 funcref), both from wasm-forth.
+    ;; Imports: prior definitions from wasm-forth:user.
     (call $out-byte (i32.const 2)) (call $out-uleb (local.get $import-size))
-    (call $out-byte (i32.const 2))
-    (call $out-byte (i32.const 10))
-    (call $copy-out (i32.const 64) (i32.const 0))
-    ;; Write literals bytewise to keep the bootstrap's own data small and clear.
-    (call $out-byte (i32.const 119)) (call $out-byte (i32.const 97))
-    (call $out-byte (i32.const 115)) (call $out-byte (i32.const 109))
-    (call $out-byte (i32.const 45)) (call $out-byte (i32.const 102))
-    (call $out-byte (i32.const 111)) (call $out-byte (i32.const 114))
-    (call $out-byte (i32.const 116)) (call $out-byte (i32.const 104))
-    (call $out-byte (i32.const 6))
-    (call $out-byte (i32.const 109)) (call $out-byte (i32.const 101))
-    (call $out-byte (i32.const 109)) (call $out-byte (i32.const 111))
-    (call $out-byte (i32.const 114)) (call $out-byte (i32.const 121))
-    (call $out-byte (i32.const 2)) (call $out-byte (i32.const 0)) (call $out-byte (i32.const 2))
-    (call $out-byte (i32.const 10))
-    (call $out-byte (i32.const 119)) (call $out-byte (i32.const 97))
-    (call $out-byte (i32.const 115)) (call $out-byte (i32.const 109))
-    (call $out-byte (i32.const 45)) (call $out-byte (i32.const 102))
-    (call $out-byte (i32.const 111)) (call $out-byte (i32.const 114))
-    (call $out-byte (i32.const 116)) (call $out-byte (i32.const 104))
-    (call $out-byte (i32.const 5))
-    (call $out-byte (i32.const 116)) (call $out-byte (i32.const 97))
-    (call $out-byte (i32.const 98)) (call $out-byte (i32.const 108))
-    (call $out-byte (i32.const 101))
-    (call $out-byte (i32.const 1)) (call $out-byte (i32.const 112))
-    (call $out-byte (i32.const 0)) (call $out-uleb (i32.const 256))
-
-    ;; Function and export sections.
+    (call $out-uleb (global.get $current))
+    (local.set $i (i32.const 0))
+    (loop $write-imports
+      (if (i32.lt_u (local.get $i) (global.get $current))
+        (then
+          (local.set $d (call $record (local.get $i)))
+          (call $out-uleb
+            (i32.add (i32.load offset=4 (local.get $d)) (i32.const 16)))
+          (call $copy-out (i32.const 88) (i32.const 15))
+          (call $out-byte (i32.const 47))
+          (call $copy-out (i32.load (local.get $d)) (i32.load offset=4 (local.get $d)))
+          (call $out-uleb (i32.load offset=4 (local.get $d)))
+          (call $copy-out (i32.load (local.get $d)) (i32.load offset=4 (local.get $d)))
+          (call $out-byte (i32.const 0))
+          (call $out-uleb (local.get $i))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $write-imports))))
+    ;; Function and export sections. REPL expressions use the reserved __repl
+    ;; name and are never entered into the persistent user registry.
     (call $out-byte (i32.const 3)) (call $out-uleb (local.get $function-size))
     (call $out-byte (i32.const 1)) (call $out-uleb (global.get $current))
     (call $out-byte (i32.const 7)) (call $out-uleb (local.get $export-size))
     (call $out-byte (i32.const 1))
     (call $out-uleb (i32.load offset=4 (local.get $r)))
     (call $copy-out (i32.load (local.get $r)) (i32.load offset=4 (local.get $r)))
-    (call $out-byte (i32.const 0)) (call $out-byte (i32.const 0))
-
-    ;; Active element segment installs function index zero at the reserved slot.
-    (call $out-byte (i32.const 9)) (call $out-uleb (local.get $element-size))
-    (call $out-byte (i32.const 1)) (call $out-byte (i32.const 0))
-    (call $out-byte (i32.const 65))
-    (call $out-sleb (i32.load offset=8 (local.get $r)))
-    (call $out-byte (i32.const 11))
-    (call $out-byte (i32.const 1)) (call $out-byte (i32.const 0))
+    (call $out-byte (i32.const 0)) (call $out-uleb (global.get $current))
 
     ;; Code: one compact i32 local group, buffered instructions, end.
     (local.set $body-size
@@ -688,9 +688,14 @@
     (call $copy-out (global.get $body-start)
       (i32.sub (global.get $body-cursor) (global.get $body-start)))
     (call $out-byte (i32.const 11))
-    (i32.const 1)
-    (local.get $payload)
-    (local.get $capacity))
+    (if (call $host-install (local.get $payload) (local.get $capacity))
+      (then
+        (global.set $defs (global.get $current))
+        (return (call $fail (i32.const 11) (i32.const 0) (i32.const 0)
+                           (i32.const 0) (i32.const 0)))))
+    (if (global.get $repl-def)
+      (then (global.set $defs (global.get $current))))
+    (call $run))
 
   (func $run (result i32 i32 i32)
     (local $r i32) (local $found i32) (local $offset i32)
@@ -728,9 +733,9 @@
                 (local.set $r (call $record (global.get $current)))
                 (i32.store (local.get $r) (global.get $token-ptr))
                 (i32.store offset=4 (local.get $r) (global.get $token-len))
-                (i32.store offset=8 (local.get $r)
-                  (i32.add (global.get $current) (i32.const 16)))
-                ;; Reserve the dictionary entry and slot before parsing the body.
+                (i32.store offset=8 (local.get $r) (i32.const 0))
+                ;; Reserve the dictionary entry before parsing the body so the
+                ;; definition can call itself directly.
                 (global.set $defs (i32.add (global.get $defs) (i32.const 1)))
                 (if (i32.eqz (call $next-token))
                   (then (return (call $fail (i32.const 2)
@@ -984,17 +989,10 @@
               (then (return (call $fail (i32.const 10) (local.get $offset)
                                         (global.get $token-len) (i32.const 1024)
                                         (global.get $depth)))))
-            (if (i32.eq (local.get $found) (global.get $current))
-              (then
-                ;; The current extension owns function index zero.
-                (call $emit-byte (i32.const 16))
-                (call $emit-byte (i32.const 0)))
-              (else
-                (call $emit-byte (i32.const 65))
-                (call $emit-sleb (i32.load offset=8 (local.get $r)))
-                (call $emit-byte (i32.const 17))
-                (call $emit-uleb (local.get $found))
-                (call $emit-byte (i32.const 0))))
+            ;; Earlier definitions are function imports in dictionary order;
+            ;; the current definition follows them at the same numeric index.
+            (call $emit-byte (i32.const 16))
+            (call $emit-uleb (local.get $found))
             (global.set $body-items (i32.add (global.get $body-items) (i32.const 1)))
             (br $tokens)))
         (if (i32.and
@@ -1018,19 +1016,10 @@
             (i32.store offset=16 (local.get $r) (global.get $depth))
             (i32.store offset=20 (local.get $r) (i32.const 1))
             (global.set $in-def (i32.const 0))
-            (global.set $pending-run (i32.const 1))
             (return (call $finish-module))))
         (return (call $fail (i32.const 2)
                            (i32.sub (global.get $source-end) (global.get $source-base))
                            (i32.const 0) (i32.const 2) (i32.const 0)))))
-    (if (global.get $pending-run)
-      (then
-        (global.set $pending-run (i32.const 0))
-        (global.set $defs (global.get $current))
-        (return
-          (i32.const 2)
-          (i32.add (global.get $current) (i32.const 16))
-          (global.get $depth))))
     (i32.const 0) (i32.const 0) (i32.const 0))
 
   (func $compile (export "compile") (param $source i32) (param $length i32)
@@ -1051,11 +1040,7 @@
     (global.set $in-def (i32.const 0))
     (call $run))
 
-  (func (export "resume") (result i32 i32 i32)
-    (call $run))
-
-  ;; Compiler actions and generated runtime functions intentionally share one
-  ;; heterogeneous table. Runtime definitions start at slot 16.
+  ;; The table is exclusively compiler-side dispatch state.
   (elem (i32.const 0) $compile-add $declare-local $compile-local-get
         $compile-local-set $compile-local-tee)
 )

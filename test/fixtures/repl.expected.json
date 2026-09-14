@@ -3,5 +3,7 @@
   { "status": "READY" },
   { "status": "RUN", "values": [42] },
   { "status": "RUN", "values": [1, 2] },
+  { "status": "READY" },
+  { "status": "RUN", "values": [4, 5] },
   { "status": "ERROR", "message": "unknown name: `missing`", "token": "missing" }
 ]

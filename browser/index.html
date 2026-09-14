@@ -505,8 +505,8 @@
         const response = await fetch("../build/compiler.wasm");
         if (!response.ok) throw new Error(`compiler request returned HTTP ${response.status}`);
         const bytes = await response.arrayBuffer();
-        ({ instance: compiler } = await WebAssembly.instantiate(bytes));
-        repl = new ReplSession(compiler);
+        repl = await ReplSession.instantiate(bytes);
+        compiler = repl.compiler;
         repl.reset();
         setStatus("ready", "ready");
         output.innerHTML = '<div class="dim initial">Compiler loaded. Define <code>forty</code>, then define <code>answer</code>, then submit <code>answer</code>.</div>';

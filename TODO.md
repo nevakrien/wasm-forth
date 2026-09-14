@@ -5,10 +5,10 @@
   must flush before executing a generated immediate, running generated code,
   an explicit `end-module`, or reaching a configured limit.
 - Add typed forward declarations and recursive groups for mutually recursive
-  functions. Table slots and signatures must be reserved before compiling any
+  functions. Linker names and signatures must be reserved before compiling any
   body in the group.
 - Add explicit foreign-module imports with signature validation and a portable
-  adapter path for registering foreign functions in the shared table.
+  adapter path for registering foreign functions in the named linker registry.
 - Add dictionary-backed typed constants. Constant compiler actions should emit
   values directly and should not consume runtime function-table slots.
 - Add `variable`-style objects backed by a persistent shared-memory data arena.

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, BufRead, IsTerminal, Write},
     ops::Range,
@@ -7,22 +8,24 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use ariadne::{Color, Config, Label, Report, ReportKind, Source};
-use wasmtime::{Engine, Linker, Memory, Module, Ref, Store, Table, TypedFunc};
+use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store, TypedFunc};
 
 const READY: i32 = 0;
-const INSTALL: i32 = 1;
-const RUN: i32 = 2;
-const ERROR: i32 = 3;
+const ERROR: i32 = 1;
+
+#[derive(Default)]
+struct HostState {
+    user_definitions: HashMap<String, Extern>,
+    execution: Option<Vec<i32>>,
+    install_error: Option<String>,
+}
 
 struct Compiler {
-    engine: Engine,
-    store: Store<()>,
+    store: Store<HostState>,
     memory: Memory,
-    table: Table,
     reset: TypedFunc<(), ()>,
     alloc: TypedFunc<i32, i32>,
     compile: TypedFunc<(i32, i32), (i32, i32, i32)>,
-    resume: TypedFunc<(), (i32, i32, i32)>,
 }
 
 impl Compiler {
@@ -30,31 +33,42 @@ impl Compiler {
         let bytes = fs::read(compiler_path()).context("read build/compiler.wasm")?;
         let engine = Engine::default();
         let module = Module::new(&engine, bytes).context("compile compiler module")?;
-        let mut store = Store::new(&engine, ());
-        let instance = Linker::new(&engine).instantiate(&mut store, &module)?;
+        let mut store = Store::new(&engine, HostState::default());
+        let mut linker = Linker::new(&engine);
+        let host_engine = engine.clone();
+        linker.func_wrap(
+            "wasm-forth:host",
+            "install",
+            move |mut caller: Caller<'_, HostState>, pointer: i32, length: i32| {
+                let result = install_extension(&host_engine, &mut caller, pointer, length);
+                match result {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        caller.data_mut().install_error = Some(format!("{error:#}"));
+                        1
+                    }
+                }
+            },
+        )?;
+        let instance = linker.instantiate(&mut store, &module)?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .context("missing memory export")?;
-        let table = instance
-            .get_table(&mut store, "table")
-            .context("missing table export")?;
         let reset = instance.get_typed_func(&mut store, "reset")?;
         let alloc = instance.get_typed_func(&mut store, "alloc")?;
         let compile = instance.get_typed_func(&mut store, "compile")?;
-        let resume = instance.get_typed_func(&mut store, "resume")?;
         Ok(Self {
-            engine,
             store,
             memory,
-            table,
             reset,
             alloc,
             compile,
-            resume,
         })
     }
 
     fn reset(&mut self) -> Result<()> {
+        self.store.data_mut().user_definitions.clear();
+        self.store.data_mut().execution = None;
         self.reset.call(&mut self.store, ())?;
         Ok(())
     }
@@ -65,37 +79,15 @@ impl Compiler {
         self.memory
             .write(&mut self.store, pointer as usize, source.as_bytes())?;
 
-        let mut response = self
+        self.store.data_mut().execution = None;
+        self.store.data_mut().install_error = None;
+        let response = self
             .compile
             .call(&mut self.store, (pointer, source.len() as i32))?;
-        while response.0 == INSTALL {
-            let mut bytes = vec![0; response.2 as usize];
-            self.memory
-                .read(&self.store, response.1 as usize, &mut bytes)?;
-            let module = Module::new(&self.engine, bytes).context("compile extension module")?;
-            let mut linker = Linker::new(&self.engine);
-            linker.define(&mut self.store, "wasm-forth", "memory", self.memory)?;
-            linker.define(&mut self.store, "wasm-forth", "table", self.table)?;
-            linker.instantiate(&mut self.store, &module)?;
-            response = self.resume.call(&mut self.store, ())?;
+        if let Some(error) = self.store.data_mut().install_error.take() {
+            anyhow::bail!("install extension module: {error}");
         }
         Ok(response)
-    }
-
-    fn call_slot(&mut self, slot: i32, result_count: i32) -> Result<Vec<i32>> {
-        let reference = self
-            .table
-            .get(&mut self.store, slot as u64)
-            .context("table slot is out of bounds")?;
-        let Ref::Func(Some(function)) = reference else {
-            anyhow::bail!("table slot is not a function");
-        };
-        let mut results = vec![wasmtime::Val::I32(0); result_count as usize];
-        function.call(&mut self.store, &[], &mut results)?;
-        results
-            .into_iter()
-            .map(|value| value.i32().context("REPL result is not i32"))
-            .collect()
     }
 
     fn error_message(&mut self, response: (i32, i32, i32)) -> Result<String> {
@@ -114,6 +106,56 @@ impl Compiler {
         let span = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
         (offset, span)
     }
+}
+
+fn install_extension(
+    engine: &Engine,
+    caller: &mut Caller<'_, HostState>,
+    pointer: i32,
+    length: i32,
+) -> Result<()> {
+    ensure!(pointer >= 0 && length >= 0, "invalid extension byte range");
+    let memory = caller
+        .get_export("memory")
+        .and_then(Extern::into_memory)
+        .context("missing compiler memory")?;
+    let mut bytes = vec![0; length as usize];
+    memory.read(&*caller, pointer as usize, &mut bytes)?;
+    let module = Module::new(engine, bytes).context("compile extension module")?;
+    let mut linker = Linker::new(engine);
+    let definitions = caller.data().user_definitions.clone();
+    for (name, value) in definitions {
+        linker.define(
+            &mut *caller,
+            &format!("wasm-forth:user/{name}"),
+            &name,
+            value,
+        )?;
+    }
+    let instance = linker.instantiate(&mut *caller, &module)?;
+    for export in module.exports() {
+        let name = export.name().to_owned();
+        let value = instance
+            .get_export(&mut *caller, &name)
+            .context("missing declared extension export")?;
+        if name == "__repl" {
+            let function = value
+                .into_func()
+                .context("__repl export is not a function")?;
+            let result_count = function.ty(&*caller).results().len();
+            let mut results = vec![wasmtime::Val::I32(0); result_count];
+            function.call(&mut *caller, &[], &mut results)?;
+            caller.data_mut().execution = Some(
+                results
+                    .into_iter()
+                    .map(|value| value.i32().context("REPL result is not i32"))
+                    .collect::<Result<_>>()?,
+            );
+        } else {
+            caller.data_mut().user_definitions.insert(name, value);
+        }
+    }
+    Ok(())
 }
 
 fn compiler_path() -> PathBuf {
@@ -143,14 +185,16 @@ fn main() -> Result<()> {
         }
         let response = compiler.compile_chunk(&source)?;
         match response.0 {
-            READY => println!("READY"),
-            RUN => {
-                let values = compiler.call_slot(response.1, response.2)?;
-                print!("RUN");
-                for value in values {
-                    print!(" {value}");
+            READY => {
+                if let Some(values) = compiler.store.data_mut().execution.take() {
+                    print!("RUN");
+                    for value in values {
+                        print!(" {value}");
+                    }
+                    println!();
+                } else {
+                    println!("READY");
                 }
-                println!();
             }
             ERROR => {
                 let message = compiler.error_message(response)?;
