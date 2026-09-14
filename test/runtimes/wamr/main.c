@@ -67,6 +67,17 @@ set_install_error(const char *message)
     snprintf(install_error, sizeof(install_error), "%s", message);
 }
 
+static uint32_t
+utf8_char_count(const char *text, uint32_t byte_length)
+{
+    uint32_t count = 0, i;
+    for (i = 0; i < byte_length; i++) {
+        if (((uint8_t)text[i] & 0xc0) != 0x80)
+            count++;
+    }
+    return count;
+}
+
 static bool
 call_definition_from(wasm_exec_env_t exec_env, Definition *definition,
                      uint32_t argc, uint32_t *argv)
@@ -321,7 +332,7 @@ main(int argc, char **argv)
 
     while (true) {
         ssize_t source_length;
-        uint32_t values[3];
+        uint32_t values[5];
         uint32_t pointer;
         uint8_t *target;
         if (interactive) {
@@ -345,7 +356,7 @@ main(int argc, char **argv)
         memcpy(target, source, (size_t)source_length);
         values[0] = pointer;
         values[1] = (uint32_t)source_length;
-        values[2] = 0;
+        values[2] = values[3] = values[4] = 0;
         execution_ready = false;
         if (!call(compiler_env, compile, 2, values, compiler_instance))
             goto done;
@@ -374,17 +385,16 @@ main(int argc, char **argv)
         else if ((int32_t)values[0] == ERROR) {
             uint8_t *message = wasm_runtime_addr_app_to_native(
                 compiler_instance, values[1]);
-            uint8_t *span = wasm_runtime_addr_app_to_native(compiler_instance,
-                                                            256);
-            uint32_t offset = 0, length = 0;
-            if (span) {
-                memcpy(&offset, span, sizeof(offset));
-                memcpy(&length, span + 4, sizeof(length));
-            }
+            uint32_t offset = values[3], length = values[4];
             if (length) {
+                uint32_t column = utf8_char_count(source, offset);
+                uint32_t width = utf8_char_count(source + offset, length);
+                uint32_t i;
                 fprintf(stderr, "%.*s", (int)source_length, source);
-                fprintf(stderr, "%*s%.*s\n", (int)offset, "", (int)length,
-                        "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^");
+                fprintf(stderr, "%*s", (int)column, "");
+                for (i = 0; i < width; i++)
+                    fputc('^', stderr);
+                fputc('\n', stderr);
             }
             printf("ERROR %.*s\n", (int)values[2], (char *)message);
         }

@@ -39,9 +39,9 @@ async function compileIncrement(text) {
     assert.equal(WebAssembly.validate(bytes), true);
   }
   return {
-    status: result.response[0],
-    payload: result.response[1],
-    length: result.response[2],
+    status: result.status,
+    payload: result.payload,
+    length: result.payloadLength,
     bytes: result.payloadBytes,
     spanOffset: result.spanOffset,
     spanLength: result.spanLength,
@@ -56,6 +56,8 @@ async function compileIncrement(text) {
   assert.equal(result.status, 0);
   assert.equal(result.payload, 0);
   assert.equal(result.length, 0);
+  assert.equal(result.spanOffset, 0);
+  assert.equal(result.spanLength, 0);
   assert.equal(result.modules.length, 1);
   assert.equal(result.instances[0].exports.answer(), 42);
 }
@@ -117,6 +119,15 @@ async function compileIncrement(text) {
 }
 
 {
+  repl.reset();
+  await compileIncrement(": sink ( i32 -- ) local x i32 !x ;");
+  const result = await compileIncrement("1 sink");
+  assert.equal(result.status, 0);
+  assert.equal(result.execution.resultCount, 0);
+  assert.equal(result.execution.value, undefined);
+}
+
+{
   const result = await compileSource(": sum ( i32 i32 -- i32 ) add ; 20 22 sum");
   assert.equal(result.status, 0);
   assert.equal(result.instances.length, 2);
@@ -170,6 +181,7 @@ const failures = [
   [": bad ( i32 -- i32 ) @missing ;", "unknown local name: `@missing`", "@missing"],
   [": bad ( i32 -- i32 ) local x i32 x ;", "local name requires @, !, or !@: `x`", "x"],
   [": add ( i32 i32 -- i32 ) i32.add ;", "duplicate definition: `add`", "add"],
+  [": __repl ( -- i32 ) 1 ;", "duplicate definition: `__repl`", "__repl"],
   [": first ( i32 -- i32 ) local x i32 !x @x ; : second ( -- i32 ) @x ;", "unknown local name: `@x`", "@x"],
 ];
 

@@ -11,21 +11,23 @@ export class ReplSession {
   }
 
   static async instantiate(bytes) {
-    let session;
+    const bridge = { session: null };
     const { instance } = await WebAssembly.instantiate(bytes, {
       "wasm-forth:host": {
         install(pointer, length) {
-          return session.install(pointer, length);
+          return bridge.session ? bridge.session.install(pointer, length) : 1;
         },
       },
     });
-    session = new ReplSession(instance);
-    return session;
+    bridge.session = new ReplSession(instance);
+    return bridge.session;
   }
 
   reset() {
     this.userDefinitions = Object.create(null);
+    this.installations = [];
     this.execution = null;
+    this.installError = null;
     this.compiler.exports.reset();
   }
 
@@ -38,7 +40,7 @@ export class ReplSession {
       if (typeof instance.exports.__repl === "function") {
         const value = instance.exports.__repl();
         this.execution = {
-          resultCount: Array.isArray(value) ? value.length : 1,
+          resultCount: value === undefined ? 0 : Array.isArray(value) ? value.length : 1,
           value,
         };
       } else {
@@ -46,7 +48,12 @@ export class ReplSession {
           this.userDefinitions[`wasm-forth:user/${name}`] = { [name]: value };
         }
       }
-      this.installations.push({ bytes, module, instance });
+      this.installations.push({
+        bytes,
+        module,
+        instance,
+        exportNames: Object.keys(instance.exports),
+      });
       return 0;
     } catch (error) {
       this.installError = error;
@@ -66,17 +73,26 @@ export class ReplSession {
     this.installError = null;
     const response = compile(pointer, source.length);
     if (this.installError) throw this.installError;
-
-    const payloadBytes = response[0] === ERROR && response[2]
-      ? new Uint8Array(memory.buffer, response[1], response[2]).slice()
-      : new Uint8Array();
-    let spanOffset = 0;
-    let spanLength = 0;
-    if (response[0] === ERROR && response[2]) {
-      const spanView = new DataView(memory.buffer);
-      spanOffset = spanView.getUint32(256, true);
-      spanLength = spanView.getUint32(260, true);
+    if (!Array.isArray(response) || response.length !== 5) {
+      throw new Error("compiler returned a malformed response");
     }
-    return { response, installations: this.installations, execution: this.execution, payloadBytes, spanOffset, spanLength };
+    const [status, payload, payloadLength, spanOffset, spanLength] = response;
+    if (status !== 0 && status !== ERROR) {
+      throw new Error(`compiler returned unknown status ${status}`);
+    }
+
+    const payloadBytes = status === ERROR && payloadLength
+      ? new Uint8Array(memory.buffer, payload, payloadLength).slice()
+      : new Uint8Array();
+    return {
+      status,
+      payload,
+      payloadLength,
+      installations: this.installations,
+      execution: this.execution,
+      payloadBytes,
+      spanOffset,
+      spanLength,
+    };
   }
 }

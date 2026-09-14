@@ -291,19 +291,6 @@
         }
       }
 
-      function signatures(text) {
-        const found = [];
-        const pattern = /:\s+([^\s()]+)\s*\(\s*([^)]*?)\s*--\s*([^)]*?)\)/g;
-        for (const match of text.matchAll(pattern)) {
-          found.push({
-            name: match[1],
-            params: match[2].trim() ? match[2].trim().split(/\s+/) : [],
-            results: match[3].trim() ? match[3].trim().split(/\s+/) : [],
-          });
-        }
-        return found;
-      }
-
       function byteToJsIndex(text, byteOffset) {
         let bytes = 0;
         let index = 0;
@@ -372,51 +359,36 @@
           head.className = "module-head";
           const name = document.createElement("span");
           name.className = "module-name";
-          name.textContent = record.signature?.name ?? `module ${index + 1}`;
+          name.textContent = record.name || `module ${index + 1}`;
           const size = document.createElement("span");
           size.className = "module-size";
           size.textContent = `${record.byteLength} bytes`;
           head.append(name, size);
           card.append(head);
-          if (record.signature) {
-            const signature = document.createElement("div");
-            signature.className = "signature";
-            signature.textContent = `( ${record.signature.params.join(" ")} -- ${record.signature.results.join(" ")} )`;
-            card.append(signature);
-          }
           modules.append(card);
         }
       }
 
       async function compileSnippet(text) {
-        const declared = signatures(text);
         const result = await repl.submit(text);
-        const records = result.installations.map(({ bytes, instance }, index) => ({
-          byteLength: bytes.length,
-          signature: declared[index],
-          instance,
-        }));
+        const records = result.installations.map(({ bytes, exportNames }) => {
+          return {
+            byteLength: bytes.length,
+            exportNames,
+            name: exportNames.includes("__repl") ? "<repl>" : exportNames.join(", "),
+          };
+        });
         moduleRecords.push(...records);
+        renderModules();
 
-        if (result.execution) {
-          const record = records.at(-1);
-          if (record && !record.signature) {
-            record.signature = {
-              name: "<repl>",
-              params: [],
-              results: Array(result.execution.resultCount).fill("i32"),
-            };
-          }
-        }
-
-        if (result.response[0] !== 0 && !result.execution) {
+        if (result.status !== 0) {
           const err = new Error(decoder.decode(result.payloadBytes) || "compiler returned an empty error");
           err.spanOffset = result.spanOffset;
           err.spanLength = result.spanLength;
+          err.records = records;
           throw err;
         }
 
-        renderModules();
         return { records, execution: result.execution };
       }
 
@@ -439,8 +411,8 @@
         try {
           const { records, execution } = await compileSnippet(text);
           const names = records
-            .map((record) => record.signature?.name)
-            .filter((name) => name && name !== "<repl>");
+            .flatMap((record) => record.exportNames)
+            .filter((name) => name !== "__repl");
           if (names.length) {
             appendOutput([{ text: `defined ${names.join(", ")}`, className: "ok" }]);
           }
@@ -454,6 +426,12 @@
           source.value = "";
           source.focus();
         } catch (error) {
+          const names = (error.records ?? [])
+            .flatMap((record) => record.exportNames)
+            .filter((name) => name !== "__repl");
+          if (names.length) {
+            appendOutput([{ text: `defined ${names.join(", ")}`, className: "ok" }]);
+          }
           renderError(text, error);
           if (error.spanLength) {
             const start = byteToJsIndex(text, error.spanOffset);

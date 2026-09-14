@@ -55,6 +55,7 @@
   (data (i32.const 33728) "unknown local name")
   (data (i32.const 33792) "local name requires @, !, or !@")
   (data (i32.const 33824) "unknown compiler error")
+  (data (i32.const 33856) "module installation failed")
 
   (func $reset (export "reset")
     (global.set $heap (i32.const 65536))
@@ -490,20 +491,20 @@
       (then (return (i32.const 33728) (i32.const 18))))
     (if (i32.eq (local.get $code) (i32.const 16))
       (then (return (i32.const 33792) (i32.const 31))))
+    (if (i32.eq (local.get $code) (i32.const 17))
+      (then (return (i32.const 33856) (i32.const 26))))
     (i32.const 33824) (i32.const 22))
 
-  ;; Offset and span stay internal and are used only to copy the failing token.
+  ;; Error locations are UTF-8 byte ranges in the submitted source.
   (func $fail (param $code i32) (param $offset i32) (param $span i32)
-               (param $expected i32) (param $actual i32) (result i32 i32 i32)
+               (param $expected i32) (param $actual i32)
+               (result i32 i32 i32 i32 i32)
     (local $text i32) (local $text-length i32) (local $payload i32)
     ;; A failed definition must not poison a persistent compile session.
     (if (global.get $in-def)
       (then
         (global.set $defs (global.get $current))
         (global.set $in-def (i32.const 0))))
-    ;; Expose the failing span so adapters can render source highlights.
-    (i32.store (i32.const 256) (local.get $offset))
-    (i32.store (i32.const 260) (local.get $span))
     (call $error-text (local.get $code))
     (local.set $text-length)
     (local.set $text)
@@ -512,7 +513,8 @@
         (i32.add (local.get $text-length)
           (select (i32.const 4) (i32.const 0) (local.get $span)))))
     (if (i32.eqz (local.get $payload))
-      (then (return (i32.const 3) (i32.const 33472) (i32.const 44))))
+      (then (return (i32.const 1) (i32.const 33472) (i32.const 44)
+                    (local.get $offset) (local.get $span))))
     (global.set $out (local.get $payload))
     (call $copy-out (local.get $text) (local.get $text-length))
     (if (local.get $span)
@@ -526,12 +528,14 @@
         (call $out-byte (i32.const 96))))
     (i32.const 1)
     (local.get $payload)
-    (i32.sub (global.get $out) (local.get $payload)))
+    (i32.sub (global.get $out) (local.get $payload))
+    (local.get $offset)
+    (local.get $span))
 
   ;; Emit and synchronously install the current definition. Earlier definitions
   ;; are ordinary named function imports. Ephemeral expressions are exported as
   ;; __repl and invoked through the same target-function ABI as named words.
-  (func $finish-module (result i32 i32 i32)
+  (func $finish-module (result i32 i32 i32 i32 i32)
     (local $r i32) (local $i i32) (local $d i32) (local $payload i32)
     (local $type-size i32) (local $import-size i32) (local $function-size i32)
     (local $export-size i32) (local $code-size i32)
@@ -691,13 +695,13 @@
     (if (call $host-install (local.get $payload) (local.get $capacity))
       (then
         (global.set $defs (global.get $current))
-        (return (call $fail (i32.const 11) (i32.const 0) (i32.const 0)
+        (return (call $fail (i32.const 17) (i32.const 0) (i32.const 0)
                            (i32.const 0) (i32.const 0)))))
     (if (global.get $repl-def)
       (then (global.set $defs (global.get $current))))
     (call $run))
 
-  (func $run (result i32 i32 i32)
+  (func $run (result i32 i32 i32 i32 i32)
     (local $r i32) (local $found i32) (local $offset i32)
     (local $classification i32) (local $number i32) (local $i i32)
     (local $expected i32) (local $actual i32)
@@ -719,6 +723,10 @@
                                             (i32.sub (global.get $source-end) (global.get $source-base))
                                             (i32.const 0) (i32.const 1) (i32.const 0)))))
                 (local.set $offset (i32.sub (global.get $token-ptr) (global.get $source-base)))
+                (if (call $token-eq (i32.const 82) (i32.const 6))
+                  (then (return (call $fail (i32.const 9) (local.get $offset)
+                                            (global.get $token-len) (i32.const 0)
+                                            (i32.const 0)))))
                 (local.set $found (call $find-def))
                 (if (i32.ne (local.get $found) (i32.const -1))
                   (then (return (call $fail (i32.const 9) (local.get $offset)
@@ -1020,10 +1028,10 @@
         (return (call $fail (i32.const 2)
                            (i32.sub (global.get $source-end) (global.get $source-base))
                            (i32.const 0) (i32.const 2) (i32.const 0)))))
-    (i32.const 0) (i32.const 0) (i32.const 0))
+    (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))
 
   (func $compile (export "compile") (param $source i32) (param $length i32)
-    (result i32 i32 i32)
+    (result i32 i32 i32 i32 i32)
     (if (i32.or
           (i32.eqz (local.get $source))
           (i32.or

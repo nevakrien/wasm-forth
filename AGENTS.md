@@ -107,7 +107,8 @@ export memory
 export reset() -> ()
 export alloc(byte_count: i32) -> pointer: i32
 export compile(source: i32, source_length: i32)
-    -> (status: i32, payload: i32, payload_length: i32)
+    -> (status: i32, payload: i32, payload_length: i32,
+        span_offset: i32, span_length: i32)
 import wasm-forth:host.install(module: i32, module_length: i32)
     -> status: i32
 ```
@@ -117,8 +118,9 @@ The host calls `reset`, allocates and writes the source bytes, then calls
 the imported installer with the generated extension module. The host copies,
 instantiates, and registers that module before returning success. On failure, the
 payload is a compiler-authored UTF-8 diagnostic containing the actual failing
-source span when one exists. Error codes and byte locations remain internal
-compiler state rather than part of the embedding contract. Returned pointers remain valid until
+source span when one exists. The returned span is a UTF-8 byte range in the
+submitted source; its offset and length are zero when no source span exists.
+Error codes remain internal compiler state. Returned pointers remain valid until
 the next `reset`. The first page contains bootstrap state and zero is reserved
 as an allocation-failure sentinel. This is not a C ABI: there is no implicit
 stack pointer, stack frame layout, allocator contract, or null-terminated

@@ -23,8 +23,8 @@ const ansiStrip = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const stderr = ansiStrip(result.stderr);
 for (const outcome of expected) {
   if (outcome.token) {
-    assert.ok(stderr.includes(outcome.token), `${runtime}: ariadne output should contain "${outcome.token}"`);
-    assert.ok(stderr.includes(": bad ( -- i32 ) missing ;"), `${runtime}: ariadne should show the source line`);
+    assert.ok(stderr.includes(outcome.token), `${runtime}: diagnostic should contain "${outcome.token}"`);
+    assert.ok(stderr.includes(": bad ( -- i32 ) missing ;"), `${runtime}: diagnostic should show the source line`);
   }
 }
 console.log(`${runtime} REPL tests passed`);

@@ -39,3 +39,21 @@ test("runs the shared persistent REPL fixture", async ({ page }) => {
     }
   }
 });
+
+test("shows definitions installed before a later compile error", async ({ page }) => {
+  await page.goto("/browser/");
+  await expect(page.locator("#status")).toHaveText("ready");
+
+  await page.locator("#source").fill(
+    ": good ( -- i32 ) 42 ; : bad ( -- i32 ) missing ;",
+  );
+  await page.locator("#submit").click();
+
+  await expect(page.locator("#status")).toHaveText("error");
+  await expect(page.locator("#modules .module-name")).toHaveText("good");
+  await expect(page.locator("#output .ok").last()).toHaveText("defined good");
+
+  await page.locator("#source").fill("good");
+  await page.locator("#submit").click();
+  await expect(page.locator("#output .value").last()).toHaveText("42");
+});

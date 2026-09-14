@@ -48,7 +48,10 @@ exported under the reserved name `__repl`.
 
 ## Build and test
 
-WABT's `wat2wasm` and Node.js are the core development dependencies.
+WABT's `wat2wasm` and Node.js are the core development dependencies. The full
+suite also requires Rust, CMake, a C compiler, Git/network access for the default
+WAMR fetch, the npm development dependencies, and Playwright's Chromium and
+Firefox installations.
 
 ```sh
 make test
@@ -57,8 +60,7 @@ make test
 This assembles `compiler/compiler.wat`, drives synchronous module installation
 on Node, WAMR, Wasmtime, Chromium, and Firefox, validates and
 instantiates every generated extension, and checks execution and structured
-failures. Rust, the npm development dependencies, and Playwright's Chromium and
-Firefox installations are required for the complete default suite.
+failures.
 
 The native-only subset tests Node, WAMR, and Wasmtime:
 

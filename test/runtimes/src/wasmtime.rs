@@ -25,7 +25,7 @@ struct Compiler {
     memory: Memory,
     reset: TypedFunc<(), ()>,
     alloc: TypedFunc<i32, i32>,
-    compile: TypedFunc<(i32, i32), (i32, i32, i32)>,
+    compile: TypedFunc<(i32, i32), (i32, i32, i32, i32, i32)>,
 }
 
 impl Compiler {
@@ -73,7 +73,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_chunk(&mut self, source: &str) -> Result<(i32, i32, i32)> {
+    fn compile_chunk(&mut self, source: &str) -> Result<(i32, i32, i32, i32, i32)> {
         let pointer = self.alloc.call(&mut self.store, source.len() as i32)?;
         ensure!(pointer != 0, "source allocation failed");
         self.memory
@@ -90,21 +90,11 @@ impl Compiler {
         Ok(response)
     }
 
-    fn error_message(&mut self, response: (i32, i32, i32)) -> Result<String> {
+    fn error_message(&mut self, response: (i32, i32, i32, i32, i32)) -> Result<String> {
         let mut bytes = vec![0; response.2 as usize];
         self.memory
             .read(&self.store, response.1 as usize, &mut bytes)?;
         String::from_utf8(bytes).context("compiler error is not UTF-8")
-    }
-
-    fn error_span(&self) -> (usize, usize) {
-        let mut bytes = [0u8; 8];
-        self.memory
-            .read(&self.store, 256, &mut bytes)
-            .expect("read error span");
-        let offset = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
-        let span = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
-        (offset, span)
     }
 }
 
@@ -197,12 +187,20 @@ fn main() -> Result<()> {
                 }
             }
             ERROR => {
+                let (off, sp) = (response.3 as usize, response.4 as usize);
                 let message = compiler.error_message(response)?;
-                let (off, sp) = compiler.error_span();
                 if sp > 0 {
                     let src = source.trim_end();
-                    let span: Range<usize> = off..off + sp;
-                    Report::build(ReportKind::Error, (), off)
+                    ensure!(
+                        off + sp <= src.len()
+                            && src.is_char_boundary(off)
+                            && src.is_char_boundary(off + sp),
+                        "compiler returned an invalid UTF-8 byte span"
+                    );
+                    let start = src[..off].chars().count();
+                    let end = start + src[off..off + sp].chars().count();
+                    let span: Range<usize> = start..end;
+                    Report::build(ReportKind::Error, (), start)
                         .with_config(Config::default().with_color(interactive))
                         .with_label(Label::new(span).with_color(Color::Red))
                         .with_message(&message)
